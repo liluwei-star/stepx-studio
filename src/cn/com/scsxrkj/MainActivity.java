@@ -41,6 +41,13 @@ import java.util.zip.*;
  */public class MainActivity extends Activity {
  static MainActivity instance;volatile boolean building;
  static final String HOME="https://studio.stepx.com/",LOCAL="https://neo.local/";
+
+ /** 导入 ZIP 时最多接受多少个文件。真实项目几百个很正常，留足余量。 */
+ static final int MAX_IMPORT_FILES = 3000;
+ /** 导入时单个文件的上限（100 MB）。语音识别模型这类文件动辄 80 MB。 */
+ static final long MAX_IMPORT_FILE = 100L * 1024 * 1024;
+ /** 导入时解压后的总量上限（200 MB）。防压缩炸弹。 */
+ static final long MAX_IMPORT_TOTAL = 200L * 1024 * 1024;
  ArtManager art;LocalRunner localRunner;CloudProjects cloud;Button aiLinkButton;StudioUsage studioUsage;AppUpdater updater;AutoLink link;LinearLayout linkBar;TextView linkStatus;
  LinearLayout root,header,tabs;FrameLayout content;WebView studio,desk;TextView title;ProgressBar progress;Button focusExit;
  boolean local=true,focus=false,desktop=false,debug;int zoom=100;String currentTab="projects";
@@ -831,18 +838,215 @@ import java.util.zip.*;
  /** 检查文件名是否安全：禁止 .. 路径穿越，限制长度 100 字以内。 */
  boolean safeFile(String n){return n.matches("[\\p{L}\\p{N}_-][\\p{L}\\p{N} ._-]{0,99}")&&!n.contains("..");}
  /**
-  * 导入项目。支持两种格式：
+  * 导入项目。支持两种来源：
   * <ul>
-  *   <li>ZIP 压缩包 —— 解出最多 40 个根目录文本文件，合计不超过 2MB</li>
-  *   <li>单个文件 —— 当作 index.html</li>
+  *   <li>ZIP 压缩包 —— 完整项目结构，可含子目录、二进制资源、大文件</li>
+  *   <li>单个 .html —— 当作单文件项目</li>
   * </ul>
   *
   * <p>无论哪种，最终必须有 index.html，否则拒绝导入。
-  * 如果指定了 importTarget，就走「候选文件」流程交给 AI 审查，不直接覆盖项目。
+  *
+  * <h3>上限</h3>
+  * <p>{@code MAX_IMPORT_FILES} 个文件、单文件 {@code MAX_IMPORT_FILE}、
+  * 解压后合计 {@code MAX_IMPORT_TOTAL}。
+  *
+  * <h3>为什么不用 readLimited 把 ZIP 整个读进内存</h3>
+  * <p>以前是这么做的，上限 2 MB。一个带语音识别模型的真实项目压缩包有
+  * 80 MB 以上，先整个读进 byte[] 就等于占 80 MB 堆，再解压又要 100 MB，
+  * 手机直接被系统杀掉。
+  *
+  * <p>现在改成流式：ZipInputStream 直接接文件流，一个条目一个条目处理，
+  * 内存里同时只留一个块。超过 {@link CloudFiles#BIG_THRESHOLD} 的条目
+  * 边读边写盘，根本不进堆。
+  *
+  * <h3>文本与二进制分开存</h3>
+  * <p>文本（html/css/js/json/md…）存原文，能在编辑器里直接改；
+  * 二进制（.onnx / .wasm / .gz / 图片…）存 base64 或落盘。
+  * 一律当文本处理的话，二进制文件会被 UTF-8 解码破坏，导入回来就是坏的。
   *
   * @param uri 用户选中的文件地址
   */
- void importProject(Uri uri){worker.execute(()->{try{byte[]bytes;try(InputStream in=getContentResolver().openInputStream(uri)){bytes=readLimited(in,2*1024*1024);}JSONObject files=new JSONObject();boolean zip=bytes.length>3&&bytes[0]=='P'&&bytes[1]=='K';if(zip){try(ZipInputStream z=new ZipInputStream(new ByteArrayInputStream(bytes))){ZipEntry en;int count=0,total=0;while((en=z.getNextEntry())!=null){if(en.isDirectory())continue;if(++count>40||!safeFile(en.getName()))throw new Exception("ZIP 只支持最多 40 个根目录文本文件");byte[]b=readLimited(z,2*1024*1024-total);total+=b.length;files.put(en.getName(),new String(b,StandardCharsets.UTF_8));}}}else files.put("index.html",new String(bytes,StandardCharsets.UTF_8));if(!files.has("index.html"))throw new Exception("项目需要 index.html");if(importTarget!=null&&!importTarget.isEmpty()){event("importCandidate",new JSONObject().put("id",importTarget).put("files",files));importTarget=null;return;}JSONObject p=new JSONObject().put("id",UUID.randomUUID().toString()).put("name","导入项目").put("files",files).put("updated",System.currentTimeMillis());upsert("projects",p);sendState();toast("已导入为新项目");}catch(Exception e){event("error",safeError(e));}});}
+ void importProject(Uri uri){
+  worker.execute(()->{
+   try{
+    // ① 读前 4 字节判断是不是 ZIP（PK\x03\x04）。
+    //    只读 4 字节就关流，不把整个文件读进来。
+    boolean zip;
+    try(InputStream probe=getContentResolver().openInputStream(uri)){
+     if(probe==null)throw new Exception("文件不可读");
+     byte[] head=new byte[4];
+     int n=probe.read(head);
+     zip=n>=4&&head[0]=='P'&&head[1]=='K'&&head[2]==3&&head[3]==4;
+    }
+
+    JSONObject entries=new JSONObject();
+    int count=0;
+    long total=0;
+
+    if(zip){
+     // ② 流式解压。BufferedInputStream 给 64 KB 缓冲，
+     //    逐条目读，不预先把 ZIP 装进内存。
+     InputStream raw=getContentResolver().openInputStream(uri);
+     if(raw==null)throw new Exception("文件不可读");
+     try(ZipInputStream z=new ZipInputStream(new java.io.BufferedInputStream(raw,65536))){
+      ZipEntry en;
+      while((en=z.getNextEntry())!=null){
+       if(en.isDirectory())continue;
+       String name=zipName(en.getName());
+       // 路径不合法、或属于依赖 / 构建产物 / 敏感文件，直接跳过。
+       // 跳过不报错 —— 真实项目里这些目录本来就不该进项目。
+       if(name==null||!CloudFiles.path(name)||CloudFiles.excluded(name))continue;
+       if(++count>MAX_IMPORT_FILES)throw new Exception("ZIP 内文件超过 "+MAX_IMPORT_FILES+" 个上限");
+       if(en.getSize()>MAX_IMPORT_FILE)throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
+       total+=importEntry(z,name,entries);
+       if(total>MAX_IMPORT_TOTAL)throw new Exception("解压后超过 "+MAX_IMPORT_TOTAL/1048576+" MB 上限，请先清理包里的构建产物");
+      }
+     }
+    }else{
+     // 单个 HTML：整份读进来，当 index.html。
+     // 上限 2 MB —— 一个手写的单页应用远到不了这个量级。
+     byte[] data;
+     try(InputStream in=getContentResolver().openInputStream(uri)){
+      data=readLimited(in,2*1024*1024);
+     }
+     entries.put("index.html",CloudFiles.entry(new String(data,StandardCharsets.UTF_8),"utf8"));
+     count=1;
+     total=data.length;
+    }
+
+    if(!entries.has("index.html"))throw new Exception("项目需要 index.html（生成的 App 一启动就找它）");
+
+    // ③ 交给 AI 审查的流程：只把纯文本小文件送过去，
+    //    大文件和二进制不进候选列表，否则那份 JSON 又会撑爆。
+    if(importTarget!=null&&!importTarget.isEmpty()){
+     JSONObject files=new JSONObject();
+     for(Iterator<String>it=entries.keys();it.hasNext();){
+      String n=it.next();
+      JSONObject e=entries.getJSONObject(n);
+      if(e.has(CloudFiles.REF_MARK))continue;
+      files.put(n,e.getString("content"));
+     }
+     event("importCandidate",new JSONObject().put("id",importTarget).put("files",files));
+     importTarget=null;
+     return;
+    }
+
+    // ④ 直接建项目。assign 负责把条目分派到 files / binaryFiles / 大文件目录
+    JSONObject p=new JSONObject()
+      .put("id",UUID.randomUUID().toString())
+      .put("name","导入项目")
+      .put("updated",System.currentTimeMillis());
+    CloudFiles.assign(p,entries,getFilesDir());
+    upsert("projects",p);
+
+    // 把大文件的实际情况记到日志：哪个文件、多大、哈希多少。
+    // 导入这类带模型的包时，这是唯一能确认「大文件真的完整落盘」的地方 ——
+    // 文件树里只显示名字，看不出字节数。
+    try{
+     JSONObject bh=p.optJSONObject("bigHashes"),bf=p.optJSONObject("binaryFiles");
+     long bigTotal=0;int bigCount=0;
+     if(bh!=null&&bf!=null)for(Iterator<String>it=bh.keys();it.hasNext();){
+      String n=it.next();
+      String ref=bf.optString(n,""),sha=bh.optString(n,"");
+      long sz=-1;
+      try{sz=new File(getFilesDir(),"project-files/"+ref).length();}catch(Exception ignored){}
+      bigTotal+=Math.max(0,sz);bigCount++;
+      android.util.Log.i("NeoImportBig","大文件 "+n+" 大小="+sz+" 字节 哈希="+(sha.length()>16?sha.substring(0,16):sha));
+     }
+     android.util.Log.i("NeoImport","导入完成 文件="+count+" 总量="+total+" 字节 大文件="+bigCount+" 个 大文件合计="+bigTotal+" 字节");
+    }catch(Exception ignored){}
+
+    sendState();
+    toast("已导入 "+count+" 个文件"+(total>=1048576?"，共 "+(total/1048576)+" MB":""));
+   }catch(Exception e){
+    event("error",safeError(e));
+   }
+  });
+ }
+
+ /**
+  * 处理 ZIP 里的一个条目，写进 entries。
+  *
+  * <p>先攒到 {@link CloudFiles#BIG_THRESHOLD}：
+  * <ul>
+  *   <li>没超过 —— 当小文件处理，判断文本还是二进制</li>
+  *   <li>超过了 —— 把已读的部分写盘，剩下的边读边写，全程不进堆</li>
+  * </ul>
+  *
+  * @param z       ZIP 流（当前条目已定位）
+  * @param name    规范化后的项目内路径
+  * @param entries 收集结果
+  * @return 这个条目解出来的字节数
+  */
+ long importEntry(ZipInputStream z,String name,JSONObject entries)throws Exception{
+  byte[] buf=new byte[65536];
+  java.io.ByteArrayOutputStream head=new java.io.ByteArrayOutputStream();
+  long total=0;
+
+  // 先读到阈值，判断要不要落盘
+  while(total<=CloudFiles.BIG_THRESHOLD){
+   int n=z.read(buf);
+   if(n<0)break;
+   total+=n;
+   if(total>MAX_IMPORT_FILE)throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
+   head.write(buf,0,n);
+  }
+
+  if(total>CloudFiles.BIG_THRESHOLD){
+   // 大文件：已读的部分先写盘，然后继续流式写完
+   String ref=CloudFiles.bigName(name);
+   File f=new File(CloudFiles.bigDir(getFilesDir()),ref);
+   java.security.MessageDigest md=java.security.MessageDigest.getInstance("SHA-256");
+   try(java.io.FileOutputStream out=new java.io.FileOutputStream(f)){
+    byte[] done=head.toByteArray();
+    out.write(done);
+    md.update(done);
+    int n;
+    while((n=z.read(buf))!=-1){
+     total+=n;
+     if(total>MAX_IMPORT_FILE){
+      out.close();
+      f.delete();   // 半成品留着没用，删掉
+      throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
+     }
+     md.update(buf,0,n);
+     out.write(buf,0,n);
+    }
+   }
+   StringBuilder s=new StringBuilder();
+   for(byte v:md.digest())s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));
+   entries.put(name,new JSONObject()
+     .put(CloudFiles.REF_MARK,ref)
+     .put("sha256",s.toString())
+     .put("size",total));
+   return total;
+  }
+
+  // 小文件：判断文本还是二进制
+  byte[] data=head.toByteArray();
+  boolean text=CloudFiles.text(data);
+  entries.put(name,CloudFiles.entry(
+    text?new String(data,StandardCharsets.UTF_8):android.util.Base64.encodeToString(data,android.util.Base64.NO_WRAP),
+    text?"utf8":"base64"));
+  return total;
+ }
+
+ /**
+  * 把 ZIP 条目名规范化成项目内路径。
+  *
+  * <p>处理三件事：反斜杠转正斜杠（Windows 打的包）、去掉开头的 "./"、
+  * 拒绝绝对路径和含 ".." 的路径（防路径穿越）。
+  *
+  * @param raw ZIP 里的原始条目名
+  * @return 规范化后的路径；不合法返回 null
+  */
+ static String zipName(String raw){
+  if(raw==null)return null;
+  String s=raw.replace('\\','/');
+  while(s.startsWith("./"))s=s.substring(2);
+  if(s.isEmpty()||s.startsWith("/")||s.equals("..")||s.contains("../"))return null;
+  return s;
+ }
  /**
   * 读一个流，但有大小上限，超过就抛异常。
   * 用来防住超大文件和压缩炸弹。

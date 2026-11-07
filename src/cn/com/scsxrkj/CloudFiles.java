@@ -83,6 +83,31 @@ final class CloudFiles {
   return out;
  }
 
+ /**
+  * 判断一段字节是不是「UTF-8 文本」。
+  *
+  * <p>判据两条：不含 NUL 字节；能按 UTF-8 严格解码（拒绝非法序列，不做静默替换）。
+  *
+  * <p>为什么要判：文本存原文（能直接在编辑器里改、体积也小），
+  * 二进制必须存 base64，否则一旦被当文本解码再写回去，文件就损坏了。
+  * 模型文件（.onnx / .wasm / .gz）全是二进制，这条判错了整个导入就废了。
+  *
+  * @param b 字节
+  */
+ static boolean text(byte[] b){
+  if(b==null)return false;
+  for(byte v:b)if(v==0)return false;
+  try{
+   java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+     .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+     .decode(java.nio.ByteBuffer.wrap(b));
+   return true;
+  }catch(Exception e){
+   return false;
+  }
+ }
+
  static boolean path(String p){if(p==null||p.isEmpty()||p.length()>240||p.startsWith("/")||java.util.regex.Pattern.compile("[\\\\\\x00-\\x1f\\x7f]").matcher(p).find())return false;for(String s:p.split("/",-1))if(s.isEmpty()||s.equals(".")||s.equals(".."))return false;return true;}
  static boolean excluded(String p){return p.matches("(?i)(?:.*/)?(?:\\.git|node_modules|\\.gradle|build|dist|\\.next|\\.cache)(?:/.*)?")||p.matches("(?i)(?:.*/)?(?:\\.env(?:\\..*)?|credentials(?:\\..*)?|secrets?(?:\\..*)?|local\\.properties|capsule\\.properties|id_rsa|id_ed25519)")||p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)");}
  /**
