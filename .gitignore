@@ -21,3 +21,5 @@ __pycache__/
 # 提交信息临时文件，不要提交
 *.tmp
 .cm.tmp
+.tmpmsg
+*.cm.tmp
