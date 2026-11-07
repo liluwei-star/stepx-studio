@@ -93,15 +93,248 @@ const project=()=>S.projects.find(x=>x.id===projectId),chat=()=>S.chats.find(x=>
 function notice(s){$('#notice').textContent=s;$('#notice').style.display='block';clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>$('#notice').style.display='none',5000)}
 function saveProject(){const p=project();if(!p)return;p.updated=Date.now();send('project',p);if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}
 function saveChat(c=chat()){if(c){c.updated=Date.now();send('chat',c)}}
-window.receive=(type,data)=>{if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;file='index.html';undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=JSON.parse(JSON.stringify(project().files));candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId&&page==='editor'){undo=[];redo=[];if(!project()?.files[file])file='index.html';render();notice('AI 已更新当前项目文件');}else renderIfAi();}};
+window.receive=(type,data)=>{
+  // 原生让前端打开某个文件（文件浏览器的「打开编辑」走这条路）
+  if(type==='openFile'){file=String(data);undo=[];redo=[];page='editor';render();return;}
+  if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;file='index.html';undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=JSON.parse(JSON.stringify(project().files));candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId&&page==='editor'){undo=[];redo=[];if(!project()?.files[file])file='index.html';render();notice('AI 已更新当前项目文件');}else renderIfAi();}};
 function renderIfAi(){if(page==='ai'||page==='collab'||page==='usage')render()}
 window.backLocal=()=>{if(closeChatHistory())return true;if(page==='collab'||page==='review'||page==='builds'){page='editor';render();return true}if(page==='editor'){page='projects';render();return true}if(page==='trash'){page='projects';render();return true}if(page==='settings'||page==='help'||page==='localModels'||page==='connectors'){page=page==='settings'&&S.aiAssistantEnabled!==false?'ai':'projects';render();return true}return false};
 window.navigate=p=>{closeChatHistory();if(p==='projects'&&page==='editor')return;page=p;render()};
 function header(tag,title,sub){send('pageTitle',{page});return ''}
-function render(){document.documentElement.dataset.ai=S.aiAssistantEnabled===false?'off':'on';if(page==='ai'&&S.aiAssistantEnabled===false)page='projects';send('pageTitle',{page});if(page==='art')return artPage();if(page==='artSettings')return artSettingsPage();if(page==='connectors')return connectorsPage();if(page==='localModels')return localModelsPage();if(page==='builds')return buildPage();if(page==='collab')return collaboration();if(page==='review')return reviewChanges();if(page==='editor')return editor();if(page==='projects')return projects();if(page==='trash')return trashPage();if(page==='settings')return settings();if(page==='ai')return ai();if(page==='usage')return usage();help()}
+function render(){document.documentElement.dataset.ai=S.aiAssistantEnabled===false?'off':'on';if(page==='ai'&&S.aiAssistantEnabled===false)page='projects';send('pageTitle',{page});if(page==='art')return artPage();if(page==='artSettings')return artSettingsPage();if(page==='connectors')return connectorsPage();if(page==='localModels')return localModelsPage();if(page==='builds')return buildPage();if(page==='collab')return collaboration();if(page==='review')return reviewChanges();if(page==='files')return filesPage();if(page==='editor')return editor();if(page==='projects')return projects();if(page==='trash')return trashPage();if(page==='settings')return settings();if(page==='ai')return ai();if(page==='usage')return usage();help()}
 function projects(){app.innerHTML=`<div class="page">${header('CREATE ON NEO','把想法，写在手机里。','本机编辑与预览，随时接着做。')}<div class="row"><button class="primary" data-a="newProject">＋ 新建项目</button><button data-a="importProject">导入 HTML / ZIP</button><button data-a="cloudList">同步云端项目 ↓</button><button data-a="cloudUploadAll" ${!S.projects.length||S.cloudBatch?.running?'disabled':''}>全部上传同步 ↑</button></div>${cloudBatchCard()}<div class="card"><div class="row spread"><strong>Step Studio</strong><span class="tag">官方云端构建</span></div><p class="muted">用自然语言构建应用、智能体和技能。</p><button data-a="studio">打开官方 Studio ↗</button></div><div class="row spread"><h2>本地项目</h2><small>${S.projects.length} 个</small></div><p class="project-hint">长按菜单 · 左滑删除 · ↑ 上传到已登录的 Studio</p>${S.projects.length?S.projects.map(projectRow).join(''):`<div class="empty">从一个能运行的小页面开始。<br>支持 HTML、CSS、JavaScript，离线可用。</div>`}<div class="noticebar">本地 Web 项目可在编辑器“构建与调试”中离线生成 APK，也可交给 Step 云端构建。</div><details class="appearance"><summary>功能与显示设置</summary><label class="setting-switch"><input id="aiToggle" type="checkbox" ${S.aiAssistantEnabled!==false?'checked':''}>开启 AI 助手</label><small>关闭后隐藏底部入口；保留模型配置、对话和用量。</small><label for="appearanceSelect">界面材质</label><select id="appearanceSelect"><option value="glass">标准玻璃</option><option value="solid">降低透明度</option><option value="contrast">增强对比度</option></select></details><div class="row"><button data-a="trash">最近删除${S.projectTrash.length?` · ${S.projectTrash.length}`:''}</button><button data-a="help">使用说明</button></div></div>`;if($('#aiToggle'))$('#aiToggle').onchange=e=>send('aiEnabled',{value:e.target.checked});if($('#appearanceSelect'))$('#appearanceSelect').value=document.documentElement.dataset.appearance||'glass';}
 function newProject(html){const name=prompt('项目名称','我的 Neo 应用');if(!name)return;const p={id:uuid(),name:name.slice(0,60),updated:Date.now(),files:{'index.html':html||'<!doctype html>\n<html lang="zh-CN">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>我的 Neo 应用</title>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n  <main>\n    <h1>你好，Neo</h1>\n    <p>第一个在手机上编辑的小应用。</p>\n    <button id="count">点按计数 · 0</button>\n  </main>\n  <script src="app.js"></script>\n</body>\n</html>','style.css':'body { margin: 0; padding: 32px 20px; font-family: system-ui; background: #eef7f4; color: #173d35; }\nmain { max-width: 560px; margin: auto; }\nbutton { background: #087f75; color: white; border: 0; border-radius: 14px; padding: 16px 24px; font-size: 18px; }','app.js':'let count = 0;\nconst button = document.querySelector("#count");\nif (button) button.onclick = () => {\n  button.textContent = `点按计数 · ${++count}`;\n};'}};S.projects.push(p);projectId=p.id;file='index.html';undo=[];redo=[];saveProject();page='editor';render()}
-function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files">${Object.keys(p.files).map(f=>`<button class="${file===f?'chosen':''}" data-a="file" data-id="${esc(f)}">${esc(f)}</button>`).join('')}<button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||'').length} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});$('#code').value=p.files[file]||'';$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(p.files[file]);if(undo.length>80)undo.shift();redo=[];p.files[file]=$('#code').value;saveProject()});$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
+/* ============================================================
+ * 文件浏览器
+ * ============================================================
+ *
+ * 为什么要有这个页面：
+ * 编辑器里的文件栏是一排横向按钮。项目只有三五个文件时够用，
+ * 但从云端同步或导入 ZIP 进来的真实项目动辄两三百个文件，
+ * 排成一行根本没法找 —— 想改某个文件只能一直往右滑。
+ *
+ * 这个页面把文件按目录分组列出，支持：
+ *   · 按文件名或文件内容搜索（内容是跨所有文本文件搜）
+ *   · 显示每个文件的大小和类型（文本 / 二进制 / 大文件）
+ *   · 重命名、复制、删除、复制内容到剪贴板
+ *
+ * 二进制文件不显示在编辑器的文件栏里（那里只列文本文件），
+ * 但在这里能看到全 —— 模型、图片这些也在。
+ */
+
+/* 文件浏览器里的搜索关键词，空串表示不搜索 */
+let fileQuery = '';
+/* 目录折叠状态：目录名 → 是否收起 */
+let fileCollapsed = {};
+/* 代码全屏模式：隐藏其他区块，代码框占满整屏 */
+let codeFocus = false;
+/* 代码字号，存本地，下次打开还是这个大小 */
+let codeFont = parseInt(localStorage.getItem('codeFont')||'13', 10) || 13;
+
+/** 把当前字号应用到代码框。 */
+function applyCodeFont(){
+  const c=$('#code');
+  if(c)c.style.fontSize=codeFont+'px';
+}
+
+/**
+ * 列出项目里的全部文件，文本和二进制都算。
+ *
+ * @param p 项目对象
+ * @return [{path, kind, size}]，按路径排序
+ *   kind: 'text' 文本 / 'bin' 普通二进制 / 'big' 大文件（内容在磁盘上）
+ */
+function allFiles(p){
+  const out=[];
+  for(const n of Object.keys(p.files||{}))out.push({path:n,kind:'text',size:(p.files[n]||'').length});
+  const bins=p.binaryFiles||{},sizes=p.binarySizes||{};
+  for(const n of Object.keys(bins)){
+    const ref=bins[n]||'';
+    out.push({path:n,kind:ref.endsWith('.bin')?'big':'bin',size:sizes[n]??-1});
+  }
+  out.sort((a,b)=>a.path.localeCompare(b.path));
+  return out;
+}
+
+/** 把字节数变成人看的大小。 */
+function fmtSize(n){
+  if(n<0)return '大小未知';
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
+/**
+ * 按名字或内容搜索文件。
+ *
+ * @param p 项目对象
+ * @param q 关键词（已转小写）
+ * @return Map，路径 → 命中行号数组（按名字命中的是空数组）
+ */
+function searchFiles(p,q){
+  const hits=new Map();
+  if(!q)return hits;
+  for(const n of Object.keys(p.files||{})){
+    const v=p.files[n]||'';
+    if(n.toLowerCase().includes(q)){hits.set(n,[]);continue}
+    const idx=v.toLowerCase().indexOf(q);
+    if(idx>=0)hits.set(n,[v.slice(0,idx).split('\n').length]);
+  }
+  for(const n of Object.keys(p.binaryFiles||{})){
+    if(n.toLowerCase().includes(q)&&!hits.has(n))hits.set(n,[]);
+  }
+  return hits;
+}
+
+/**
+ * 打开某个文件的操作菜单。
+ *
+ * 具体操作交给原生做 —— 项目的权威数据在原生那边（state），
+ * 前端只是一份快照。前端改完再 send 回去，容易出现两边不一致；
+ * 让原生改完 sendState() 推回来，只有一条路径。
+ *
+ * @param path 文件路径
+ */
+function fileMenu(path){
+  const p=project();
+  if(!p)return;
+  send('fileOps',{projectId:p.id,path});
+}
+
+/** 文件浏览器页面。 */
+function filesPage(){
+  const p=project();
+  if(!p){page='projects';render();return}
+  const all=allFiles(p),q=fileQuery.trim().toLowerCase();
+  const hits=searchFiles(p,q);
+  const shown=q?all.filter(f=>hits.has(f.path)):all;
+  const nText=all.filter(f=>f.kind==='text').length;
+  const nBin=all.length-nText;
+  const nBig=all.filter(f=>f.kind==='big').length;
+
+  // 按目录分组。根目录那组的标题是「(根目录)」。
+  const groups=new Map();
+  for(const f of shown){
+    const i=f.path.lastIndexOf('/');
+    const dir=i<0?'':f.path.slice(0,i);
+    if(!groups.has(dir))groups.set(dir,[]);
+    groups.get(dir).push(f);
+  }
+
+  const rows=[];
+  for(const [dir,list] of groups){
+    const key=dir||'\u0000root';
+    const collapsed=fileCollapsed[key]===true;
+    rows.push(`<button class="fdir" data-a="fmToggle" data-id="${esc(key)}">`+
+      `<span class="fcaret">${collapsed?'▸':'▾'}</span>`+
+      `<span class="fdirname">${esc(dir||'（根目录）')}</span>`+
+      `<span class="fcount">${list.length}</span></button>`);
+    if(collapsed)continue;
+    for(const f of list){
+      const base=dir?f.path.slice(dir.length+1):f.path;
+      const icon=f.kind==='text'?'📄':f.kind==='big'?'🗃':'🧩';
+      const lineHit=(hits.get(f.path)||[])[0];
+      const badge=f.kind==='text'?'':(f.kind==='big'?'大文件':'二进制');
+      rows.push(`<div class="frow">`+
+        `<button class="fname" data-a="file" data-id="${esc(f.path)}">`+
+          `<span class="ficon">${icon}</span>`+
+          `<span class="fpath">${esc(base)}</span>`+
+          `<span class="fsize">${fmtSize(f.size)}</span>`+
+          (badge?`<span class="fbadge">${badge}</span>`:'')+
+          (lineHit?`<span class="fhit">第 ${lineHit} 行</span>`:'')+
+        `</button>`+
+        `<button class="fmore" data-a="fileMenu" data-id="${esc(f.path)}">⋯</button>`+
+      `</div>`);
+    }
+  }
+
+  app.innerHTML=`<div class="page files-page">`+
+    `<div class="row">`+
+      `<button data-a="backEditor">‹ 返回编辑</button>`+
+      `<h2 class="grow">文件</h2>`+
+      `<button data-a="addFile">＋ 新建</button>`+
+    `</div>`+
+    `<input id="fileSearch" type="search" placeholder="搜索文件名，或输入一段文字在全部文件里找…" value="${esc(fileQuery)}" autocomplete="off">`+
+    `<div class="fmeta">`+
+      `共 ${all.length} 个 · 文本 ${nText}`+
+      (nBin?` · 二进制 ${nBin}`:'')+
+      (nBig?`（其中大文件 ${nBig}）`:'')+
+      (q?` · 匹配 ${shown.length} 个`:'')+
+    `</div>`+
+    `<div class="fileTree">${rows.join('')||'<div class="muted" style="padding:16px">没有匹配的文件</div>'}</div>`+
+  `</div>`;
+
+  const box=$('#fileSearch');
+  if(box){
+    box.addEventListener('input',()=>{
+      fileQuery=box.value;
+      // 只重绘文件树，不重绘搜索框 —— 否则输入焦点和光标位置会丢
+      const tree=document.querySelector('.fileTree');
+      if(!tree)return;
+      const pp=project();
+      const qq=fileQuery.trim().toLowerCase();
+      const hh=searchFiles(pp,qq);
+      const list=(qq?allFiles(pp).filter(f=>hh.has(f.path)):allFiles(pp));
+      tree.innerHTML=renderFileRows(list,hh);
+      const mx=document.querySelector('.fmeta');
+      if(mx)mx.textContent=buildFileMeta(pp,qq,hh);
+    });
+    // 直接聚焦会让键盘挡住列表，改成用户点了才聚焦
+  }
+}
+
+/** 把文件列表渲染成一行行 HTML（搜索时局部刷新用，逻辑和 filesPage 一致）。 */
+function renderFileRows(list,hits){
+  const groups=new Map();
+  for(const f of list){
+    const i=f.path.lastIndexOf('/');
+    const dir=i<0?'':f.path.slice(0,i);
+    if(!groups.has(dir))groups.set(dir,[]);
+    groups.get(dir).push(f);
+  }
+  const rows=[];
+  for(const [dir,arr] of groups){
+    const key=dir||'\u0000root';
+    const collapsed=fileCollapsed[key]===true;
+    rows.push(`<button class="fdir" data-a="fmToggle" data-id="${esc(key)}">`+
+      `<span class="fcaret">${collapsed?'▸':'▾'}</span>`+
+      `<span class="fdirname">${esc(dir||'（根目录）')}</span>`+
+      `<span class="fcount">${arr.length}</span></button>`);
+    if(collapsed)continue;
+    for(const f of arr){
+      const base=dir?f.path.slice(dir.length+1):f.path;
+      const icon=f.kind==='text'?'📄':f.kind==='big'?'🗃':'🧩';
+      const lineHit=(hits.get(f.path)||[])[0];
+      const badge=f.kind==='text'?'':(f.kind==='big'?'大文件':'二进制');
+      rows.push(`<div class="frow">`+
+        `<button class="fname" data-a="file" data-id="${esc(f.path)}">`+
+          `<span class="ficon">${icon}</span>`+
+          `<span class="fpath">${esc(base)}</span>`+
+          `<span class="fsize">${fmtSize(f.size)}</span>`+
+          (badge?`<span class="fbadge">${badge}</span>`:'')+
+          (lineHit?`<span class="fhit">第 ${lineHit} 行</span>`:'')+
+        `</button>`+
+        `<button class="fmore" data-a="fileMenu" data-id="${esc(f.path)}">⋯</button>`+
+      `</div>`);
+    }
+  }
+  return rows.join('')||'<div class="muted" style="padding:16px">没有匹配的文件</div>';
+}
+
+/** 顶部那行统计文字。 */
+function buildFileMeta(p,q,hits){
+  const all=allFiles(p);
+  const nText=all.filter(f=>f.kind==='text').length;
+  const nBin=all.length-nText;
+  const nBig=all.filter(f=>f.kind==='big').length;
+  return `共 ${all.length} 个 · 文本 ${nText}`+
+    (nBin?` · 二进制 ${nBin}`:'')+
+    (nBig?`（其中大文件 ${nBig}）`:'')+
+    (q?` · 匹配 ${hits.size} 个`:'');
+}
+
+function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor${codeFocus?' code-focus':''}" id="editorRoot"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files"><button class="chosen" data-a="file" data-id="${esc(file)}">${esc(file)}</button><button data-a="filesPage">📁 全部 ${allFiles(p).length} 个</button><button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="codeFocus">${codeFocus?'⛶ 退出全屏':'⛶ 全屏'}</button><button data-a="fontMinus">A−</button><button data-a="fontPlus">A+</button><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||'').length} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});$('#code').value=p.files[file]||'';
+  applyCodeFont();$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(p.files[file]);if(undo.length>80)undo.shift();redo=[];p.files[file]=$('#code').value;saveProject()});$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
 function insert(t){const e=$('#code');if(!e)return;const pos=e.selectionStart;e.setRangeText(t,pos,e.selectionEnd,'end');e.dispatchEvent(new Event('input'));e.focus()}
 function compiled(p){let html=p.files['index.html']||'';const doc=new DOMParser().parseFromString(html,'text/html');for(const el of [...doc.querySelectorAll('link[rel="stylesheet"][href]')]){let n=el.getAttribute('href').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('style');s.textContent=p.files[n];el.replaceWith(s)}}for(const el of [...doc.querySelectorAll('script[src]')]){let n=el.getAttribute('src').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('script');s.textContent=p.files[n].replace(/<\/script/gi,'<\\/script');el.replaceWith(s)}}return '<!doctype html>\n'+doc.documentElement.outerHTML}
 let aiEditMode='auto',githubResearch=true;
@@ -216,6 +449,39 @@ try{
 }catch(e){}
 
 const EXPLAIN={
+  filesPage:['浏览全部文件',
+    '打开文件浏览器，把项目里所有文件列出来。\n\n'+
+    '为什么需要它：项目从云端同步或从 ZIP 导入进来常有几百个文件，编辑器里那排横向按钮要一直往右滑才能翻完。\n\n'+
+    '文件浏览器里：\n'+
+    '· 按目录分组，点目录名可以收起/展开\n'+
+    '· 顶部搜索框能搜文件名，也能输入一段文字在全部文件内容里找\n'+
+    '· 每行显示文件大小；大文件、二进制文件会单独标出来\n'+
+    '· 右边的「⋯」可以重命名、复制一份、删除、复制内容到剪贴板\n\n'+
+    '注意：编辑器里只能改文本文件；二进制和大文件（图片、模型）在浏览器里能看到，但点开会提示不能编辑。'],
+  fileMenu:['文件操作',
+    '对这一个文件做管理操作：\n\n'+
+    '· 打开编辑 —— 回到编辑器改内容（只有文本文件有这个）\n'+
+    '· 重命名 —— 可以连目录一起改，比如把 utils.js 改成 lib/utils.js，目录会自动建\n'+
+    '· 复制一份 —— 内容复制成另一个文件，改坏了好回退\n'+
+    '· 复制内容到剪贴板 —— 把整个文件内容拷走，粘到别处\n'+
+    '· 用剪贴板内容覆盖 —— 拿剪贴板里的文字替换掉这个文件\n'+
+    '· 删除 —— 删掉这个文件，大文件会连手机里的那份一起清掉'],
+  codeFocus:['全屏代码',
+    '把代码框铺满整屏，暂时藏起上下的按钮和文件栏。\n\n'+
+    '手机上改代码时上面挤了太多东西，实际能看到的代码只有几行。全屏后能一次看几十行。\n\n'+
+    '全屏时工具栏只留几个真正常用的：退出全屏、撤销、重做、查找、复制。\n'+
+    '再点一次就退出全屏，所有按钮回来。'],
+  fontPlus:['放大代码字号',
+    '把代码里的字调大一档，最大 24 号。\n\n'+
+    '字号记在本机，下次打开还是这个大小。\n'+
+    '旁边的 A− 是缩小。'],
+  fontMinus:['缩小代码字号',
+    '把代码里的字调小一档，最小 9 号。\n\n'+
+    '字号记在本机，下次打开还是这个大小。\n'+
+    '旁边的 A+ 是放大。'],
+  backEditor:['返回编辑器',
+    '从文件浏览器回到代码编辑界面。\n\n'+
+    '刚才在浏览器里点开过的那个文件会保持选中。'],
   importProject:['导入 HTML / ZIP',
     '把外面做好的网页项目搬进本应用。\n\n'+
     '· 选 .zip 压缩包\n  解出完整的项目结构，可以含子目录、图片、模型文件，当成一个多文件项目\n\n'+
@@ -505,17 +771,25 @@ function showExplain(key,title,body,btn){
   mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:99999;'+
     'display:flex;align-items:center;justify-content:center;padding:22px;overflow:auto';
   const card=document.createElement('div');
+  // 卡片用 flex 列布局：正文可滚，按钮固定在底部。
+  // 为什么重要：说明文字一长（比如七八行），按钮会被挤出可视区，
+  // 用户点「继续」实际点在遮罩上 —— 遮罩的点击是「关闭」，
+  // 所以表现成「弹框关了但什么都没执行」。
   card.style.cssText='background:#2b2b2e;border:1px solid rgba(255,255,255,.10);border-radius:18px;'+
     'padding:22px 20px;max-width:460px;width:100%;color:#ededf0;box-shadow:0 18px 60px rgba(0,0,0,.55);'+
-    'max-height:84vh;overflow:auto';
+    'max-height:84vh;display:flex;flex-direction:column';
   const btnStyle='flex:1;height:44px;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.14);background:transparent;color:#b8b8c0';
   const okStyle='flex:1;height:44px;border-radius:11px;font-size:15px;font-weight:700;cursor:pointer;border:0;background:#ff8a5b;color:#231a16';
   card.innerHTML=
-    '<div style="font-size:17px;font-weight:700;color:#ff8a5b;margin-bottom:12px">'+esc(title)+'</div>'+
-    '<div style="font-size:14px;line-height:1.75;white-space:pre-wrap;color:#d8d8de">'+esc(body)+'</div>'+
-    '<label style="display:flex;align-items:center;gap:9px;margin-top:18px;font-size:13px;color:#9a9aa4;cursor:pointer">'+
-      '<input type="checkbox" id="expSkip" style="width:17px;height:17px;accent-color:#ff8a5b">这个按钮的说明不再提示</label>'+
-    '<div style="display:flex;gap:10px;margin-top:18px">'+
+    // 可滚动的正文区
+    '<div style="overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch">'+
+      '<div style="font-size:17px;font-weight:700;color:#ff8a5b;margin-bottom:12px">'+esc(title)+'</div>'+
+      '<div style="font-size:14px;line-height:1.75;white-space:pre-wrap;color:#d8d8de">'+esc(body)+'</div>'+
+      '<label style="display:flex;align-items:center;gap:9px;margin-top:18px;font-size:13px;color:#9a9aa4;cursor:pointer">'+
+        '<input type="checkbox" id="expSkip" style="width:17px;height:17px;accent-color:#ff8a5b">这个按钮的说明不再提示</label>'+
+    '</div>'+
+    // 按钮区：不参与滚动，永远贴在卡片底部
+    '<div style="display:flex;gap:10px;margin-top:18px;flex-shrink:0">'+
       '<button id="expNo" style="'+btnStyle+'">取消</button>'+
       '<button id="expYes" style="'+okStyle+'">继续</button>'+
     '</div>';
@@ -543,7 +817,16 @@ function showExplain(key,title,body,btn){
  * 可以直接调用它 —— 之前是靠 btn.click() 重新派发一次点击事件，
  * 但那样在同一帧里刚移除遮罩就派发，事件偶尔会被吞掉，
  * 表现是按了「继续」什么都没发生（比如导入 ZIP 不弹文件选择器）。 */
-function handleAction(b){const a=b.dataset.a,id=b.dataset.id;if(explainGuard(a,b))return;const p=project(),c=chat();if(['projects','trash','settings','ai','usage','help','localModels'].includes(a)){page=a;render();return}switch(a){case 'cloudRelay':if(!id)saveProject();send('cloudRelay',{id:id||p.id});break;case 'cloudUploadAll':send('cloudUploadAll');break;case 'cloudCancel':send('cloudCancel');break;case 'resetExplains':{let n=0;try{const keys=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.indexOf('explainSeen:')===0)keys.push(k)}keys.forEach(k=>localStorage.removeItem(k));n=keys.length;}catch(e){}const r=document.querySelector('#explainResetResult');if(r)r.textContent=n?('已重置 '+n+' 个按钮，下次点击会重新显示说明'):'当前没有勾过「不再提示」的按钮';break}case 'cloudList':send('cloudList');break;case 'cloudPull':send('cloudPull',{id:p.id});break;case 'cloudUpload':if(!id)saveProject();send('cloudUpload',{id:id||p.id});break;case 'checkUpdates':send('checkUpdates');break;case 'newProject':newProject();break;case 'importProject':send('importProject');break;case 'studio':send('studio');break;case 'openProject':projectId=id;file='index.html';undo=[];redo=[];page='editor';render();break;case 'projectList':page='projects';render();break;case 'file':file=id;undo=[];redo=[];render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',p);break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(p.files[file]);p.files[file]=undo.pop();saveProject();$('#code').value=p.files[file]}break;case 'redo':if(redo.length){undo.push(p.files[file]);p.files[file]=redo.pop();saveProject();$('#code').value=p.files[file]}break;case 'findCode':{let q=prompt('查找文字');if(q){const t=$('#code'),pos=t.value.indexOf(q,t.selectionEnd);let at=pos>=0?pos:t.value.indexOf(q);if(at>=0){t.focus();t.setSelectionRange(at,at+q.length)}else notice('未找到')}break}case 'copyCode':send('copy',{text:p.files[file]});break;case 'aiCode':page='ai';includeCode=true;render();break;case 'chatHistory':openChatHistory();break;case 'newChat':newChat();break;case 'send':sendMessage();break;case 'cancel':send('cancel');break;case 'exportChat':if(c)send('exportText',{name:'neo-conversation.md',text:'# '+c.name+'\n\n'+c.messages.map(m=>'## '+(m.role==='user'?'我':'AI')+'\n\n'+m.content).join('\n\n')});break;case 'deleteChat':requestChatDeletion(c?[c.id]:[]);break;case 'copyMessage':send('copy',{text:c.messages[+id].content});break;case 'reviewAiFiles':{const edit=c.messages[+id].edit;if(!S.projects.some(x=>x.id===edit.projectId)){notice('原目标项目不存在');break}projectId=edit.projectId;candidateProjectId=edit.projectId;candidateBase=edit.base;candidateFiles=edit.files;candidateSource='AI 助手';page='review';render();break}case 'applyHtml':{const m=c.messages[+id].content.match(/```(?:html)?\s*\n([\s\S]*?)```/i);if(m&&confirm('把此代码另存为新项目？原项目保留。'))newProject(m[1]);break}case 'freshProfile':editProfile=null;detectedModels=[];settings();break;case 'importProfiles':importProfilesFromClipboard();break;case 'editProfile':editProfile=id;detectedModels=[];settings();break;case 'saveProfile':saveProfile('');break;case 'testProfile':if(confirm('保存配置并发送一次简短测试请求？服务商可能计费。'))saveProfile('test');break;case 'detectModels':saveProfile('detect');break;case 'deleteProfile':if(confirm('删除此配置及加密密钥？')){send('delete',{list:'profiles',id:editProfile});S.profiles=S.profiles.filter(x=>x.id!==editProfile);editProfile=null;settings()}break;case 'today':usageScope='today';usage();break;case 'allUsage':usageScope='all';usage();break;case 'usageExport':send('usageExport');break;}
+function handleAction(b){
+  const a=b.dataset.a,id=b.dataset.id;
+  if(explainGuard(a,b))return;const p=project(),c=chat();if(['projects','trash','settings','ai','usage','help','localModels'].includes(a)){page=a;render();return}switch(a){case 'cloudRelay':if(!id)saveProject();send('cloudRelay',{id:id||p.id});break;case 'cloudUploadAll':send('cloudUploadAll');break;case 'cloudCancel':send('cloudCancel');break;case 'resetExplains':{let n=0;try{const keys=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.indexOf('explainSeen:')===0)keys.push(k)}keys.forEach(k=>localStorage.removeItem(k));n=keys.length;}catch(e){}const r=document.querySelector('#explainResetResult');if(r)r.textContent=n?('已重置 '+n+' 个按钮，下次点击会重新显示说明'):'当前没有勾过「不再提示」的按钮';break}case 'cloudList':send('cloudList');break;case 'cloudPull':send('cloudPull',{id:p.id});break;case 'cloudUpload':if(!id)saveProject();send('cloudUpload',{id:id||p.id});break;case 'checkUpdates':send('checkUpdates');break;case 'newProject':newProject();break;case 'importProject':send('importProject');break;case 'studio':send('studio');break;case 'openProject':projectId=id;file='index.html';undo=[];redo=[];page='editor';render();break;
+case 'backEditor':page='editor';render();break;
+case 'filesPage':page='files';render();break;
+case 'codeFocus':codeFocus=!codeFocus;editor();break;
+case 'fontPlus':codeFont=Math.min(24,codeFont+1);localStorage.setItem('codeFont',codeFont);applyCodeFont();break;
+case 'fontMinus':codeFont=Math.max(9,codeFont-1);localStorage.setItem('codeFont',codeFont);applyCodeFont();break;
+case 'fmToggle':fileCollapsed[id]=!fileCollapsed[id];filesPage();break;
+case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',p);break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(p.files[file]);p.files[file]=undo.pop();saveProject();$('#code').value=p.files[file]}break;case 'redo':if(redo.length){undo.push(p.files[file]);p.files[file]=redo.pop();saveProject();$('#code').value=p.files[file]}break;case 'findCode':{let q=prompt('查找文字');if(q){const t=$('#code'),pos=t.value.indexOf(q,t.selectionEnd);let at=pos>=0?pos:t.value.indexOf(q);if(at>=0){t.focus();t.setSelectionRange(at,at+q.length)}else notice('未找到')}break}case 'copyCode':send('copy',{text:p.files[file]});break;case 'aiCode':page='ai';includeCode=true;render();break;case 'chatHistory':openChatHistory();break;case 'newChat':newChat();break;case 'send':sendMessage();break;case 'cancel':send('cancel');break;case 'exportChat':if(c)send('exportText',{name:'neo-conversation.md',text:'# '+c.name+'\n\n'+c.messages.map(m=>'## '+(m.role==='user'?'我':'AI')+'\n\n'+m.content).join('\n\n')});break;case 'deleteChat':requestChatDeletion(c?[c.id]:[]);break;case 'copyMessage':send('copy',{text:c.messages[+id].content});break;case 'reviewAiFiles':{const edit=c.messages[+id].edit;if(!S.projects.some(x=>x.id===edit.projectId)){notice('原目标项目不存在');break}projectId=edit.projectId;candidateProjectId=edit.projectId;candidateBase=edit.base;candidateFiles=edit.files;candidateSource='AI 助手';page='review';render();break}case 'applyHtml':{const m=c.messages[+id].content.match(/```(?:html)?\s*\n([\s\S]*?)```/i);if(m&&confirm('把此代码另存为新项目？原项目保留。'))newProject(m[1]);break}case 'freshProfile':editProfile=null;detectedModels=[];settings();break;case 'importProfiles':importProfilesFromClipboard();break;case 'editProfile':editProfile=id;detectedModels=[];settings();break;case 'saveProfile':saveProfile('');break;case 'testProfile':if(confirm('保存配置并发送一次简短测试请求？服务商可能计费。'))saveProfile('test');break;case 'detectModels':saveProfile('detect');break;case 'deleteProfile':if(confirm('删除此配置及加密密钥？')){send('delete',{list:'profiles',id:editProfile});S.profiles=S.profiles.filter(x=>x.id!==editProfile);editProfile=null;settings()}break;case 'today':usageScope='today';usage();break;case 'allUsage':usageScope='all';usage();break;case 'usageExport':send('usageExport');break;}
 }
 app.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b)handleAction(b);});
 render();

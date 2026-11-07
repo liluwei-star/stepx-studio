@@ -113,3 +113,151 @@ html[data-appearance=contrast] .tag{background:#333;color:#fff;border-color:#aaa
 .field{display:block;margin:12px 0 4px}
 .field input[type=text],.field input:not([type]){margin-top:6px}
 .field input[type=checkbox]{display:inline-block;width:20px;min-height:20px;margin:0 8px 0 0;vertical-align:middle}
+
+/* ============================================================
+ * 文件浏览器
+ * ============================================================
+ *
+ * 项目动辄两三百个文件，编辑器里那排横向按钮根本翻不过来。
+ * 这个页面把文件按目录分组，带搜索和操作入口。
+ */
+
+.files-page{display:flex;flex-direction:column;gap:10px;padding-bottom:24px}
+
+/* 搜索框：固定高度，不跟着列表滚 */
+.files-page #fileSearch{
+  flex-shrink:0;
+  font-size:14px;
+  padding:12px 14px;
+  border-radius:12px;
+  background:#17171b;
+  border:1px solid #3d3d44;
+  color:#e8e8ee;
+}
+
+/* 顶部统计：共 N 个 · 文本 M · 二进制 K */
+.files-page .fmeta{flex-shrink:0;font-size:12px;color:#9a9aa4;padding:0 2px}
+
+/* 文件树容器：占满剩余高度，自己滚 */
+.files-page .fileTree{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding-bottom:12px;
+}
+
+/* 目录标题行 */
+.files-page .fdir{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  text-align:left;
+  font-size:12px;
+  font-weight:700;
+  color:#b9c6d6;
+  background:#1d1d22;
+  border:1px solid #2e2e34;
+  border-radius:10px;
+  padding:9px 12px;
+  letter-spacing:.2px;
+}
+
+.files-page .fcaret{color:#7f8b99;font-size:11px}
+.files-page .fdirname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files-page .fcount{color:#78787f;font-weight:400}
+
+/* 单个文件一行：左边名字，右边「⋯」 */
+.files-page .frow{display:flex;align-items:stretch;gap:6px}
+
+.files-page .fname{
+  flex:1;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+  text-align:left;
+  font-size:13px;
+  padding:11px 12px;
+  border-radius:10px;
+  background:#202024;
+  border:1px solid #33333a;
+  color:#e4e4ea;
+}
+
+.files-page .fname .ficon{flex-shrink:0;font-size:14px;opacity:.9}
+
+/* 文件名过长时省略中间不重要 —— 直接尾部截断，按钮右边留出空间给大小标签 */
+.files-page .fname .fpath{
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-family:ui-monospace,monospace;
+}
+
+.files-page .fname .fsize{flex-shrink:0;font-size:11px;color:#8d8d97}
+.files-page .fname .fbadge{
+  flex-shrink:0;
+  font-size:10px;
+  padding:2px 6px;
+  border-radius:6px;
+  background:#3a2f22;
+  color:#e0a86a;
+  border:1px solid #5a4526;
+}
+.files-page .fname .fhit{
+  flex-shrink:0;
+  font-size:10px;
+  padding:2px 6px;
+  border-radius:6px;
+  background:#1e3326;
+  color:#7fd39a;
+  border:1px solid #2f5340;
+}
+
+.files-page .fmore{
+  flex-shrink:0;
+  width:46px;
+  font-size:16px;
+  border-radius:10px;
+  background:#26262b;
+  border:1px solid #33333a;
+  color:#a9a9b3;
+}
+
+.files-page .fname:active,.files-page .fmore:active{background:#2b2b31}
+.files-page .fname[data-id$="index.html"]{border-color:#3d5a7a}
+
+/* ============================================================
+ * 代码全屏模式
+ * ============================================================
+ *
+ * 手机上代码框经常被上面的区块挤得只剩几行。
+ * 切到全屏就只留代码，其他区块全部让位。
+ */
+
+.editor.code-focus> .row,
+.editor.code-focus> .cloud-controls,
+.editor.code-focus> .files,
+.editor.code-focus> .live-card,
+.editor.code-focus> .status{display:none}
+
+/* 全屏时工具栏只留退出全屏、撤销重做、查找这些真正常用的 */
+.editor.code-focus> .tools> button[data-a="fontMinus"],
+.editor.code-focus> .tools> button[data-a="fontPlus"],
+.editor.code-focus> .tools> button[data-a="indent"],
+.editor.code-focus> .tools> button[data-a="collab"],
+.editor.code-focus> .tools> button[data-a="builds"],
+.editor.code-focus> .tools> button[data-a="aiCode"],
+.editor.code-focus> .tools> button[data-a="exportProject"],
+.editor.code-focus> .tools> button[data-a="renameProject"],
+.editor.code-focus> .tools> button[data-a="deleteFile"],
+.editor.code-focus> .tools> button[data-a="deleteProject"]{display:none}
+
+/* 全屏时代码框吃掉所有剩余空间 */
+.editor.code-focus #code{flex:1;min-height:0}

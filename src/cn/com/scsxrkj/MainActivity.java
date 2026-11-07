@@ -494,7 +494,30 @@ import java.util.zip.*;
   * <p>和 {@link #state} 的区别：这里会把 API Key 换成 {@code hasKey} 布尔值，
   * 密钥本身永远不会传给网页，避免被页面脚本读走。
   */
- synchronized JSONObject publicState()throws Exception{JSONObject c=new JSONObject(state.toString());c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);JSONArray ap=c.getJSONArray("artProfiles");for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.getJSONArray("profiles");for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));return c;}
+ synchronized JSONObject publicState()throws Exception{JSONObject c=new JSONObject(state.toString());c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);JSONArray ap=c.getJSONArray("artProfiles");for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.getJSONArray("profiles");for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));
+  // 给每个项目补上二进制文件的大小，供文件浏览器显示。
+  // 文本文件的大小前端自己算得了（字符串长度），二进制不行 ——
+  // base64 的原文长度看不出来，大文件的 .bin 引用更是只有个名字。
+  JSONArray prs=c.getJSONArray("projects");
+  for(int i=0;i<prs.length();i++){
+   JSONObject pr=prs.getJSONObject(i),sizes=new JSONObject();
+   JSONObject bf=pr.optJSONObject("binaryFiles");
+   if(bf!=null)for(java.util.Iterator<String> k=bf.keys();k.hasNext();){
+    String n=k.next(),v=bf.optString(n,"");
+    long sz;
+    if(v.endsWith(".bin")){
+     // 大文件：内容在 project-files 里，读文件长度（只读元数据，很快）
+     File f=new File(new File(getFilesDir(),"project-files"),v);
+     sz=f.isFile()?f.length():-1;
+    }else{
+     // 普通二进制存 base64，按长度换算
+     sz=(long)v.length()*3/4;
+    }
+    sizes.put(n,sz);
+   }
+   pr.put("binarySizes",sizes);
+  }
+  return c;}
  /** 把状态快照推给本地界面（页面里的 receive('state', ...)）。 */
  void sendState(){try{event("state",publicState());}catch(Exception e){toast("读取本地资料失败");}}
  /**
@@ -658,7 +681,8 @@ import java.util.zip.*;
    /* 在手机本地运行项目，用内置浏览器看效果 */ case "localRun":if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(MainActivity.this,byId("projects",p.getString("id")));localRunner.start();break;
    /* 预览一段 HTML 代码（断网隔离） */ case "preview":preview(p.getString("html"));break;
    /* 把项目全部文件打成 ZIP 导出 */ case "exportProject":exportProject(p);break;
-   /* 把任务文字交给 Amoo（系统 AI 启动器）执行 */ case "amooHandoff":handoffAmoo(p);break;/* 把本地项目关联到官方 Studio 的某个项目页 */ case "studioLink":linkStudio(p.getString("id"));break;/* 抓取官方 Studio 页面上的可见文字当上下文 */ case "studioCapture":captureStudio(p.getString("id"));break;/* 打开项目关联的官方 Studio 页面 */ case "studioOpen":openStudioProject(p.getString("id"));break;/* 把本地内容填进官方 Studio 的输入框 */ case "studioHandoff":handoffStudio(p);break;/* 从手机文件导入项目（ZIP 或多文件） */ case "importProject":importTarget=p.optString("target","");importKind=1;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,21);break;
+   /* 把任务文字交给 Amoo（系统 AI 启动器）执行 */ case "amooHandoff":handoffAmoo(p);break;/* 把本地项目关联到官方 Studio 的某个项目页 */ case "studioLink":linkStudio(p.getString("id"));break;/* 抓取官方 Studio 页面上的可见文字当上下文 */ case "studioCapture":captureStudio(p.getString("id"));break;/* 打开项目关联的官方 Studio 页面 */ case "studioOpen":openStudioProject(p.getString("id"));break;/* 把本地内容填进官方 Studio 的输入框 */ case "studioHandoff":handoffStudio(p);break;/* 文件操作菜单：重命名 / 复制 / 删除 / 复制内容（在文件浏览器里点「⋯」触发） */ case "fileOps":fileOps(p);break;
+   /* 从手机文件导入项目（ZIP 或多文件） */ case "importProject":importTarget=p.optString("target","");importKind=1;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,21);break;
    /* 导出一段文本文件 */ case "exportText":exportText(p.optString("name","conversation.md"),p.getString("text"),"text/plain");break;
    /* 查询官方 Studio 的 Token 用量 */ case "studioUsageCheck":studioUsage.check();break;/* 请求官方 Studio 的运行时用量数据 */ case "studioUsageRuntime":studioUsage.requestRuntime();break;/* 停止用量统计 */ case "studioUsageStop":studioUsage.stop();break;/* 导出官方 Studio 的用量报告 */ case "studioUsageExport":studioUsage.exportReport(p.getString("id"));break;
    /* 把 Token 账本导出成 CSV */ case "usageExport":exportUsage();break;
@@ -866,6 +890,284 @@ import java.util.zip.*;
   *
   * @param uri 用户选中的文件地址
   */
+ /**
+  * 文件操作菜单：重命名 / 复制一份 / 删除 / 复制内容 / 用剪贴板覆盖。
+  *
+  * <p>为什么放在原生做：项目的权威数据是 native 的 state，前端只是一份快照。
+  * 前端自己改完再 send 回来，容易出现「两边不一致」；
+  * 让原生改完 sendState() 推回去，只有一条写入路径。
+  *
+  * @param req 参数：{@code projectId}、{@code path}
+  */
+ void fileOps(JSONObject req){
+  try{
+   final String pid=req.getString("projectId"),path=req.getString("path");
+   final JSONObject proj=byId("projects",pid);
+   final boolean isText=proj.getJSONObject("files").has(path);
+   JSONObject bins=proj.optJSONObject("binaryFiles");
+   final boolean isBin=bins!=null&&bins.has(path);
+   if(!isText&&!isBin)throw new Exception("文件不存在");
+
+   ArrayList<String>ops=new ArrayList<>();
+   if(isText)ops.add("打开编辑");
+   ops.add("重命名");
+   ops.add("复制一份");
+   if(isText){
+    ops.add("复制内容到剪贴板");
+    ops.add("用剪贴板内容覆盖");
+   }
+   ops.add("删除");
+
+   final String[]arr=ops.toArray(new String[0]);
+   runOnUiThread(()->new AlertDialog.Builder(this)
+     .setTitle(path)
+     .setItems(arr,(d,n)->{
+      try{
+       String op=arr[n];
+       if(op.equals("打开编辑")){
+        desk.evaluateJavascript("window.receive&&receive('openFile',"+JSONObject.quote(path)+")",null);
+       }else if(op.equals("重命名")){
+        promptRename(pid,path);
+       }else if(op.equals("复制一份")){
+        promptDuplicate(pid,path);
+       }else if(op.equals("复制内容到剪贴板")){
+        ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE))
+          .setPrimaryClip(ClipData.newPlainText("StepX Studio",proj.getJSONObject("files").getString(path)));
+        toast("已复制文件内容");
+       }else if(op.equals("用剪贴板内容覆盖")){
+        pasteOverFile(pid,path);
+       }else if(op.equals("删除")){
+        confirmDeleteFile(pid,path);
+       }
+      }catch(Exception e){toast("操作失败："+safeError(e));}
+     })
+     .setNegativeButton("取消",null).show());
+  }catch(Exception e){toast("打不开文件菜单："+safeError(e));}
+ }
+
+ /** 弹输入框改文件名。 */
+ void promptRename(final String pid,final String from){
+  final EditText e=new EditText(this);
+  e.setText(from);
+  e.setSelectAllOnFocus(true);
+  runOnUiThread(()->new AlertDialog.Builder(this)
+    .setTitle("重命名")
+    .setMessage("输入新路径。可以带目录，例如 utils/format.js，目录会自动创建。")
+    .setView(e)
+    .setPositiveButton("确定",(d,n)->{
+     try{renameFile(pid,from,e.getText().toString().trim());}
+     catch(Exception ex){toast("重命名失败："+safeError(ex));}
+    })
+    .setNegativeButton("取消",null).show());
+ }
+
+ /** 弹输入框复制一份。 */
+ void promptDuplicate(final String pid,final String from){
+  final EditText e=new EditText(this);
+  // 默认在文件名后面加 -副本，扩展名保留
+  int slash=from.lastIndexOf('/'),dot=from.lastIndexOf('.');
+  String suggest=dot>slash?from.substring(0,dot)+"-副本"+from.substring(dot):from+"-副本";
+  e.setText(suggest);
+  e.setSelectAllOnFocus(true);
+  runOnUiThread(()->new AlertDialog.Builder(this)
+    .setTitle("复制为")
+    .setView(e)
+    .setPositiveButton("复制",(d,n)->{
+     try{duplicateFile(pid,from,e.getText().toString().trim());}
+     catch(Exception ex){toast("复制失败："+safeError(ex));}
+    })
+    .setNegativeButton("取消",null).show());
+ }
+
+ /** 确认后删除文件。 */
+ void confirmDeleteFile(final String pid,final String path){
+  runOnUiThread(()->new AlertDialog.Builder(this)
+    .setTitle("删除文件")
+    .setMessage(path+"\n\n删除后无法恢复。大文件会同时从手机里清掉。")
+    .setPositiveButton("删除",(d,n)->{
+     try{deleteProjectFile(pid,path);}
+     catch(Exception ex){toast("删除失败："+safeError(ex));}
+    })
+    .setNegativeButton("取消",null).show());
+ }
+
+ /** 用剪贴板里的文字覆盖一个文本文件。 */
+ void pasteOverFile(final String pid,final String path){
+  try{
+   ClipboardManager cm=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+   ClipData clip=cm.getPrimaryClip();
+   if(clip==null||clip.getItemCount()==0)throw new Exception("剪贴板是空的");
+   CharSequence cs=clip.getItemAt(0).coerceToText(this);
+   if(cs==null)throw new Exception("剪贴板内容无法读取");
+   String text=cs.toString();
+   JSONObject proj=byId("projects",pid);
+   proj.getJSONObject("files").put(path,text);
+   proj.put("updated",System.currentTimeMillis());
+   upsert("projects",proj);
+   sendState();
+   toast("已用剪贴板内容覆盖（"+text.length()+" 字符）");
+  }catch(Exception e){toast("粘贴失败："+safeError(e));}
+ }
+
+ /**
+  * 重命名项目里的一个文件。
+  *
+  * <p>大文件要特别处理：它在项目里是一个 {@code .bin} 引用名，
+  * 这个名字是「路径的哈希」。路径变了名字也得跟着变，
+  * 磁盘上那份文件还要改名搬家，否则引用就指向不存在的东西。
+  *
+  * @param pid  项目 id
+  * @param from 原路径
+  * @param to   新路径
+  */
+ void renameFile(String pid,String from,String to)throws Exception{
+  if(from.equals(to))return;
+  JSONObject proj=byId("projects",pid);
+  checkTarget(proj,to,from);
+  JSONObject files=proj.getJSONObject("files");
+  JSONObject bins=proj.optJSONObject("binaryFiles"),hashes=proj.optJSONObject("bigHashes");
+
+  if(files.has(from)){
+   files.put(to,files.getString(from));
+   files.remove(from);
+  }else if(bins!=null&&bins.has(from)){
+   String ref=bins.getString(from);
+   if(ref.endsWith(".bin")){
+    String newRef=moveBigFile(ref,CloudFiles.bigName(to));
+    bins.put(to,newRef);
+    if(hashes!=null){
+     String h=hashes.optString(from,"");
+     hashes.remove(from);
+     if(!h.isEmpty())hashes.put(to,h);
+    }
+   }else{
+    bins.put(to,ref);
+   }
+   bins.remove(from);
+  }else throw new Exception("文件不存在");
+
+  proj.put("updated",System.currentTimeMillis());
+  upsert("projects",proj);
+  sendState();
+  toast("已重命名");
+ }
+
+ /**
+  * 复制项目里的一个文件。
+  *
+  * @param pid  项目 id
+  * @param from 源路径
+  * @param to   目标路径
+  */
+ void duplicateFile(String pid,String from,String to)throws Exception{
+  if(from.equals(to))throw new Exception("目标和原文件相同");
+  JSONObject proj=byId("projects",pid);
+  checkTarget(proj,to,from);
+  JSONObject files=proj.getJSONObject("files");
+  JSONObject bins=proj.optJSONObject("binaryFiles"),hashes=proj.optJSONObject("bigHashes");
+
+  if(files.has(from)){
+   files.put(to,files.getString(from));
+  }else if(bins!=null&&bins.has(from)){
+   String ref=bins.getString(from);
+   if(ref.endsWith(".bin")){
+    // 大文件：磁盘上复制一份，新路径对应新的引用名
+    String newRef=copyBigFile(ref,CloudFiles.bigName(to));
+    bins.put(to,newRef);
+    if(hashes!=null){
+     String h=hashes.optString(from,"");
+     if(!h.isEmpty())hashes.put(to,h);
+    }
+   }else{
+    bins.put(to,ref);
+   }
+  }else throw new Exception("文件不存在");
+
+  proj.put("updated",System.currentTimeMillis());
+  upsert("projects",proj);
+  sendState();
+  toast("已复制一份");
+ }
+
+ /**
+  * 删除项目里的一个文件。
+  *
+  * <p>大文件如果已经没有别的路径引用它，连磁盘上那份一起删掉，
+  * 不然删了文件还占着空间。
+  *
+  * @param pid  项目 id
+  * @param path 路径
+  */
+ void deleteProjectFile(String pid,String path)throws Exception{
+  JSONObject proj=byId("projects",pid);
+  JSONObject files=proj.getJSONObject("files");
+  JSONObject bins=proj.optJSONObject("binaryFiles"),hashes=proj.optJSONObject("bigHashes");
+
+  if(files.has(path)){
+   files.remove(path);
+  }else if(bins!=null&&bins.has(path)){
+   String ref=bins.getString(path);
+   bins.remove(path);
+   if(hashes!=null)hashes.remove(path);
+   if(ref.endsWith(".bin")&&!stillReferenced(bins,ref)){
+    try{new File(new File(getFilesDir(),"project-files"),ref).delete();}catch(Exception ignored){}
+   }
+  }else throw new Exception("文件不存在");
+
+  proj.put("updated",System.currentTimeMillis());
+  upsert("projects",proj);
+  sendState();
+  toast("已删除");
+ }
+
+ /** 目标路径是否可用：合法、没被占用、不是保留的入口文件。 */
+ void checkTarget(JSONObject proj,String to,String from)throws Exception{
+  if(!CloudFiles.path(to))throw new Exception("路径无效（不能以 / 开头，不能含 ..，每段要有内容）");
+  if(CloudFiles.excluded(to))throw new Exception("这个路径类型不放进项目（依赖目录或敏感文件）");
+  if(!to.equals(from)){
+   JSONObject files=proj.getJSONObject("files"),bins=proj.optJSONObject("binaryFiles");
+   if(files.has(to)||(bins!=null&&bins.has(to)))throw new Exception("目标已存在："+to);
+  }
+ }
+
+ /** 磁盘上的大文件改名。跨分区改名失败时退化成复制+删除。 */
+ String moveBigFile(String oldRef,String newRef)throws Exception{
+  if(oldRef.equals(newRef))return newRef;
+  File dir=new File(getFilesDir(),"project-files");
+  File src=new File(dir,oldRef),dst=new File(dir,newRef);
+  if(!src.isFile())throw new Exception("大文件缺失："+oldRef);
+  if(!src.renameTo(dst)){copyFile(src,dst);if(!src.delete())throw new Exception("旧文件删不掉");}
+  return newRef;
+ }
+
+ /** 磁盘上的大文件复制一份。 */
+ String copyBigFile(String oldRef,String newRef)throws Exception{
+  if(oldRef.equals(newRef))throw new Exception("引用名重复");
+  File dir=new File(getFilesDir(),"project-files");
+  File src=new File(dir,oldRef),dst=new File(dir,newRef);
+  if(!src.isFile())throw new Exception("大文件缺失："+oldRef);
+  copyFile(src,dst);
+  return newRef;
+ }
+
+ /** 分块复制文件，不把整个文件读进内存。 */
+ void copyFile(File src,File dst)throws Exception{
+  try(java.io.FileInputStream in=new java.io.FileInputStream(src);
+      java.io.FileOutputStream out=new java.io.FileOutputStream(dst)){
+   byte[]b=new byte[65536];int n;
+   while((n=in.read(b))!=-1)out.write(b,0,n);
+  }
+ }
+
+ /** 判断一个 .bin 引用还有没有别的路径在用。 */
+ boolean stillReferenced(JSONObject bins,String ref)throws Exception{
+  if(bins==null)return false;
+  for(java.util.Iterator<String>it=bins.keys();it.hasNext();){
+   if(ref.equals(bins.optString(it.next(),"")))return true;
+  }
+  return false;
+ }
+
  void importProject(Uri uri){
   worker.execute(()->{
    try{
