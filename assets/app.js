@@ -115,7 +115,7 @@ const presets=[['自定义兼容接口','https://','compatible',''],['DeepSeek',
 function settings(){app.innerHTML=`<div class="page"><button data-art="settings">绘图 API 与美术资源</button>${header('CONNECT','模型与 API','密钥加密保存在手机，不提供给 Studio 网页或项目导出。')}<div class="row">${S.profiles.filter(p=>p.protocol!=='local').map(p=>`<button data-a="editProfile" data-id="${esc(p.id)}">${esc(p.name)}</button>`).join('')}<button data-a="freshProfile">＋ 新配置</button></div><div class="card"><label for="preset">快速填写服务商</label><select id="preset">${presets.map((x,i)=>`<option value="${i}">${x[0]}</option>`).join('')}</select><label for="pname">配置名称</label><input id="pname" maxlength="60" placeholder="我的模型"><label for="endpoint">Base URL 或完整请求地址</label><input id="endpoint" type="url" placeholder="https://api.example.com/v1" autocapitalize="off"><label for="protocol">接口协议</label><select id="protocol"><option value="compatible">Chat Completions 兼容协议</option><option value="anthropic">Anthropic Messages</option></select><button id="detectButton" data-a="detectModels" style="margin-top:12px">保存并检测模型</button><div id="modelPicker">${detectedModels.length?`<label for="modelSearch">搜索检出的模型（${detectedModels.length}）</label><input id="modelSearch" placeholder="输入关键词"><select id="detectedModel" aria-label="检测到的模型"><option value="">选择模型…</option>${detectedModels.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('')}</select>`:''}</div><label for="model">模型 ID（以服务商账户为准）</label><input id="model" autocapitalize="off" placeholder="填写模型标识"><label for="key">API Key</label><input id="key" type="password" autocomplete="off" placeholder="新密钥；编辑时留空保留"><p id="keyhint" class="keyhint"></p><p id="contextLimit" class="muted"></p><label for="maxTokens">单次最大输出 token</label><input id="maxTokens" type="number" value="4096" min="64" max="32768"><label class="setting-switch"><input id="streaming" type="checkbox" checked>实时显示生成内容（接口需支持流式响应）</label><label for="thinking">推理模式（DeepSeek 等支持该参数的兼容接口）</label><select id="thinking"><option value="">服务商默认</option><option value="disabled">关闭推理，直接输出</option><option value="enabled">开启推理</option></select><label for="system">系统提示词</label><textarea id="system" rows="3" placeholder="你是一位中文编程助手…"></textarea><div class="row" style="margin-top:16px"><button class="primary" data-a="saveProfile">保存配置</button><button data-a="testProfile">保存并测试</button>${editProfile?'<button class="danger" data-a="deleteProfile">删除配置</button>':''}</div></div><div class="noticebar">使用 API 会按服务商规则计费。“测试”也会发起一次短请求。这里配置的模型只用于本地 AI 助手，不会替换官方 Studio 的后端模型。支持项目开发工具与官方连接器说明查询；暂不支持 Responses 协议。生成图片请在独立的“绘图 API”中配置。</div><button data-a="ai">返回 AI 助手</button></div>`;const p=S.profiles.find(x=>x.id===editProfile);if(p){for(const k of ['name','endpoint','protocol','model','maxTokens','thinking','system'])$(k==='name'?'#pname':'#'+k).value=p[k]??'';$('#keyhint').textContent=p.hasKey?'已保存密钥，留空即可保留':'尚未保存密钥'}$('#streaming').checked=p?.streaming!==false;$('#endpoint').addEventListener('input',refreshModelLimits);$('#model').addEventListener('input',refreshModelLimits);refreshModelLimits();if($('#detectedModel'))$('#detectedModel').onchange=e=>{if(e.target.value){$('#model').value=e.target.value;refreshModelLimits()}};if($('#modelSearch'))$('#modelSearch').oninput=e=>{const q=e.target.value.toLowerCase();$('#detectedModel').innerHTML='<option value="">选择模型…</option>'+detectedModels.filter(m=>m.toLowerCase().includes(q)).map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('')};$('#preset').onchange=e=>{const x=presets[e.target.value];$('#pname').value=x[0];$('#endpoint').value=x[1];$('#protocol').value=x[2];$('#model').value=x[3];refreshModelLimits();$('#key').value='';if(editProfile){editProfile=null;$('#keyhint').textContent='将保存为新配置，不沿用原服务商密钥'}};}
 function saveProfile(next=''){const p={id:editProfile||uuid(),name:$('#pname').value.trim(),endpoint:$('#endpoint').value.trim(),protocol:$('#protocol').value,model:$('#model').value.trim(),key:$('#key').value.trim(),maxTokens:Number($('#maxTokens').value),system:$('#system').value,streaming:$('#streaming').checked,thinking:$('#thinking').value,next};if(!p.name||!p.endpoint||(!p.model&&next!=='detect')){notice('请填写名称、接口地址和模型 ID；也可先检测模型');return false}if(!Number.isInteger(p.maxTokens)||p.maxTokens<64||p.maxTokens>modelLimits(p).output){notice('最大输出应在 64–'+modelLimits(p).output+' 之间');return false}send('profile',p);return true;}
 
-function help(){app.innerHTML=`<div class="page"><p class="muted">StepX Studio · scsxrkj.com.cn</p><div class="card"><h2>版本更新</h2><p>可选功能：配置 GitHub 只读令牌后可检查正式版本并下载 APK。当前更新仓库为私有仓库，未配置令牌时无法检查；日常更新请直接安装新版 APK。</p><button data-a="checkUpdates">检查更新</button></div><div class="card"><h2>AI 开关与云端项目</h2><p>在本地项目页“功能与显示设置”或右上角更多菜单开关 AI 助手，关闭后底部入口隐藏，配置和对话保留。</p><p>“同步云端项目”选择 Studio 项目下载源码；编辑器“同步到本地”更新已关联项目，“上传项目”将本地文件写回云端。首次上传新建云端项目，之后继续同一项目。两边同时修改同一文件时停止覆盖。</p><p>保留子目录和二进制资源，排除依赖、构建产物、凭据和签名材料；上限 300 个文件、单文件 1 MB、合计 4 MB。上传不删除云端其他文件；中断显示部分完成。支持内置依赖范围内的前端源码本机编译与运行；其他依赖及任意 npm 脚本需外部环境。</p></div><div class="card"><h2>官方 Studio</h2><p>底部 Studio 打开官方网页，登录后使用应用、智能体和技能构建。右上角菜单提供刷新、前进、桌面模式、缩放、查找、下载列表和专注模式。</p><p>网站功能、模型和云端构建由官方提供。本客户端无法替换其服务端模型。Token 页可检查当前项目的官方历史返回字段；字段缺失时会显示原因，不用 0 冒充用量。</p></div><div class="card"><h2>本地项目</h2><p>新建后直接编辑 HTML / CSS / JS。草稿保存在应用私有目录；运行可检查界面和 JavaScript 错误；导出 ZIP 后可继续在 Mac 上开发。</p><p>预览会编译支持的前端源码，默认断网；可手动开启 HTTPS 网络，文件与设备权限不开放。导入支持最多 40 个根目录文本文件、总大小 2 MB，须含 index.html；支持通过预编译运行壳离线封装 APK，不包含 npm 或任意 Kotlin/Gradle 工程编译器。</p><p>应用卸载会删除本地资料，请定期导出项目和对话。项目支持长按菜单、左滑删除；确认后移到最近删除，可恢复或另行彻底删除。云端项目、已导出文件、已安装App及Token账本保留。</p></div><div class="card"><h2>构建与调试</h2><p>编辑器中选择本机离线或 Step 云端路径。生成 APK 后须按系统提示安装；运行 App 的菜单可开启调试、查看和回传报告。每次调用已有 AI 配置都会原生确认。卸载 StepX Studio 会丢失本机签名密钥，无法直接更新此前生成的 App。</p></div><div class="card"><h2>项目协作</h2><p>编辑器的“项目协作”可管理共享目标、任务、Step 上下文和外部 AI 结果。先关联具体 Studio 项目，再交接草稿或导入页面文字。代码 ZIP 与 AI 文件建议都需逐文件审查；应用前保存快照。</p><p>共享上下文可预览和导出。切换不同 API 模型可按规划、实现、审查顺序接力；自动联动可在前台完成模型规划 → Studio 开发 → 模型审查，最多 1–3 轮；已有草稿、切换项目、离开应用或异常会停止。云端与本地通过明确交接同步，没有自动双向文件锁或后台合并。</p></div><div class="card"><h2>Amoo 与显示</h2><p>项目协作中的“交给 Amoo”会先预览任务，再打开 Amoo 分享入口；请在 Amoo 核对并发送。执行结果经人工核对后填回项目，尚无后台自动执行或自动回调。</p><p>本地项目页底部可选择标准玻璃、降低透明度或增强对比度。本地界面采用阶跃 AI 的炭黑、灰色与橙色方向，并参考 Apple Liquid Glass 的层级与材质原则，未使用 Apple UI 框架或图形资源。</p></div><div class="card"><h2>AI 与 Token</h2><p>设置 HTTPS 接口、模型 ID 和密钥，可保存多个配置。在 AI 助手选择本地项目，可直接修改、先审查或只讨论。每轮从本机读取全部最新文件；自动保存前验证目标和修改基线，保留最近五次快照。失败、截断和文件冲突不会写入。</p><p>发送过程中保持应用打开。输出上限默认 4096。官方 DeepSeek 支持 1,048,576 Token 上下文、最高 393,216 Token 输出；其他接口最高可设 32768，以对应模型能力为准。上下文包括输入与输出预留。API 错误会显示 HTTP 状态，不自动重试或转发密钥。</p><p>用量来自服务商返回字段：兼容接口输入与输出相加；Anthropic 输入包含缓存读取与缓存写入。账本自动汇总已记录的全部项目；Step API、Studio 和第三方 API 分开计算。Studio 取各项目最新已读取报告，没有报告或 usage 时标为未知。</p></div><button data-a="projects">返回项目</button><div class="card"><h2>来源与许可</h2><p>本工具基于公开的 STEPX Neo 社区实践整理改进。设备端签名使用 apksig-android 4.4.0（Apache 2.0），端侧模型运行时使用 Google LiteRT-LM 0.18.0（Apache 2.0），内置前端依赖各自遵循其原许可。完整许可全文随安装包分发。</p><button data-a="license">查看第三方许可</button></div></div>`}
+function help(){app.innerHTML=`<div class="page"><p class="muted">StepX Studio · scsxrkj.com.cn</p><div class="card"><h2>版本更新</h2><p>可选功能：自动检查 GitHub 上的新版本并下载安装。更新仓库是公开的，无需令牌。不联网时可以直接安装新版 APK 覆盖升级。</p><button data-a="checkUpdates">检查更新</button></div><div class="card"><h2>AI 开关与云端项目</h2><p>在本地项目页“功能与显示设置”或右上角更多菜单开关 AI 助手，关闭后底部入口隐藏，配置和对话保留。</p><p>“同步云端项目”选择 Studio 项目下载源码；编辑器“同步到本地”更新已关联项目，“上传项目”将本地文件写回云端。首次上传新建云端项目，之后继续同一项目。两边同时修改同一文件时停止覆盖。</p><p>保留子目录和二进制资源，排除依赖、构建产物、凭据和签名材料；上限 300 个文件、单文件 1 MB、合计 4 MB。上传不删除云端其他文件；中断显示部分完成。支持内置依赖范围内的前端源码本机编译与运行；其他依赖及任意 npm 脚本需外部环境。</p></div><div class="card"><h2>官方 Studio</h2><p>底部 Studio 打开官方网页，登录后使用应用、智能体和技能构建。右上角菜单提供刷新、前进、桌面模式、缩放、查找、下载列表和专注模式。</p><p>网站功能、模型和云端构建由官方提供。本客户端无法替换其服务端模型。Token 页可检查当前项目的官方历史返回字段；字段缺失时会显示原因，不用 0 冒充用量。</p></div><div class="card"><h2>本地项目</h2><p>新建后直接编辑 HTML / CSS / JS。草稿保存在应用私有目录；运行可检查界面和 JavaScript 错误；导出 ZIP 后可继续在 Mac 上开发。</p><p>预览会编译支持的前端源码，默认断网；可手动开启 HTTPS 网络，文件与设备权限不开放。导入支持最多 40 个根目录文本文件、总大小 2 MB，须含 index.html；支持通过预编译运行壳离线封装 APK，不包含 npm 或任意 Kotlin/Gradle 工程编译器。</p><p>应用卸载会删除本地资料，请定期导出项目和对话。项目支持长按菜单、左滑删除；确认后移到最近删除，可恢复或另行彻底删除。云端项目、已导出文件、已安装App及Token账本保留。</p></div><div class="card"><h2>构建与调试</h2><p>编辑器中选择本机离线或 Step 云端路径。生成 APK 后须按系统提示安装；运行 App 的菜单可开启调试、查看和回传报告。每次调用已有 AI 配置都会原生确认。卸载 StepX Studio 会丢失本机签名密钥，无法直接更新此前生成的 App。</p></div><div class="card"><h2>项目协作</h2><p>编辑器的“项目协作”可管理共享目标、任务、Step 上下文和外部 AI 结果。先关联具体 Studio 项目，再交接草稿或导入页面文字。代码 ZIP 与 AI 文件建议都需逐文件审查；应用前保存快照。</p><p>共享上下文可预览和导出。切换不同 API 模型可按规划、实现、审查顺序接力；自动联动可在前台完成模型规划 → Studio 开发 → 模型审查，最多 1–3 轮；已有草稿、切换项目、离开应用或异常会停止。云端与本地通过明确交接同步，没有自动双向文件锁或后台合并。</p></div><div class="card"><h2>Amoo 与显示</h2><p>项目协作中的“交给 Amoo”会先预览任务，再打开 Amoo 分享入口；请在 Amoo 核对并发送。执行结果经人工核对后填回项目，尚无后台自动执行或自动回调。</p><p>本地项目页底部可选择标准玻璃、降低透明度或增强对比度。本地界面采用阶跃 AI 的炭黑、灰色与橙色方向，并参考 Apple Liquid Glass 的层级与材质原则，未使用 Apple UI 框架或图形资源。</p></div><div class="card"><h2>AI 与 Token</h2><p>设置 HTTPS 接口、模型 ID 和密钥，可保存多个配置。在 AI 助手选择本地项目，可直接修改、先审查或只讨论。每轮从本机读取全部最新文件；自动保存前验证目标和修改基线，只保留上一版快照（可回退一步）。失败、截断和文件冲突不会写入。</p><p>发送过程中保持应用打开。输出上限默认 4096。官方 DeepSeek 支持 1,048,576 Token 上下文、最高 393,216 Token 输出；其他接口最高可设 32768，以对应模型能力为准。上下文包括输入与输出预留。API 错误会显示 HTTP 状态，不自动重试或转发密钥。</p><p>用量来自服务商返回字段：兼容接口输入与输出相加；Anthropic 输入包含缓存读取与缓存写入。账本自动汇总已记录的全部项目；Step API、Studio 和第三方 API 分开计算。Studio 取各项目最新已读取报告，没有报告或 usage 时标为未知。</p></div><button data-a="projects">返回项目</button><div class="card"><h2>来源与许可</h2><p>本工具基于公开的 STEPX Neo 社区实践整理改进。设备端签名使用 apksig-android 4.4.0（Apache 2.0），端侧模型运行时使用 Google LiteRT-LM 0.18.0（Apache 2.0），内置前端依赖各自遵循其原许可。完整许可全文随安装包分发。</p><button data-a="license">查看第三方许可</button></div></div>`}
 
 /* ============================================================
  * 按钮首次点击说明
@@ -278,15 +278,122 @@ const EXPLAIN={
     '查一下 GitHub 上有没有 StepX Studio 的新版本。\n\n'+
     '有新版会显示版本号和更新说明，可以下载安装。\n'+
     '只认正式发布版，且下载后要核对文件指纹，对不上不会装。'],
-  license:['查看第三方许可',
-    '看这个应用里用到的开源库和它们的授权协议。\n'+
-    '按法律要求，这些许可全文必须随安装包一起分发。'],
-  help:['使用说明',
-    '看功能说明、常见问题和免责声明。'],
   trash:['最近删除',
     '看被删掉的项目。在这里可以恢复，也可以彻底删除。'],
+  newProject:['新建项目',
+    '从零开始建一个空项目，写好名字就能进编辑器写代码。\n\n'+
+    '建好后项目里有一个最简的 index.html，可以直接改。\n'+
+    '也可以在 AI 助手里直接说「做一个 xxx」，它会自动建项目。'],
+  addFile:['新建文件',
+    '在项目里加一个新文件。\n\n'+
+    '文件名要带后缀，比如 style.css、app.js、data.json。\n'+
+    '不支持子目录（所有文件都在项目根目录下）。'],
+  deleteFile:['删除文件',
+    '把当前这个文件从项目里删掉，删了不能恢复。\n\n'+
+    'index.html 删掉后项目就跑不起来了，删之前想清楚。'],
+  applyHtml:['应用改动',
+    '把编辑器里改好的内容保存回项目。\n\n'+
+    '改完不点这个，改动只在编辑器里，打包出去还是旧的。'],
+  addTask:['添加任务',
+    '给项目加一条待办任务。写清楚要做什么，\n'+
+    '之后可以让 AI 一条条去执行，或者自己动手做。\n\n'+
+    '任务只是备忘清单，不会自动执行。'],
+  runProjectTask:['执行这个任务',
+    '把这条任务的内容发给 AI，让它现在就动手做。\n\n'+
+    '会消耗 Token。做完的改动按你选的模式处理：\n'+
+    '直接写入 或 先给你审查。'],
+  saveProfile:['保存配置',
+    '把接口地址、密钥、模型名存下来。\n\n'+
+    '密钥存在手机加密区，不会写进项目文件，导出 ZIP 也带不走。'],
+  editProfile:['编辑配置',
+    '修改这套模型的参数：地址、密钥、模型名。\n\n'+
+    '如果只换地址不换密钥，出于安全会要求你重新填一次密钥，\n'+
+    '防止把密钥误发到别的服务器。'],
+  send:['发送',
+    '把输入框里的内容发给 AI。\n\n'+
+    '会消耗 Token，用量记进「Token 账本」。\n'+
+    '发送后可以随时点「取消」中断。'],
+  chatHistory:['对话历史',
+    '看以前的所有对话，可以搜索、批量删除、导出。\n\n'+
+    '删对话只删对话记录，项目文件和 Token 账本都保留。'],
+  newChat:['新对话',
+    '开一段全新的对话，不带之前的上下文。\n\n'+
+    '聊久了上下文变长会变慢变贵，换新对话能省不少。'],
+  deleteChat:['删除对话',
+    '把这段对话删掉，删了不能恢复。\n'+
+    '项目文件和 Token 账本不受影响。'],
+  indent:['整理缩进',
+    '自动把代码的缩进排整齐，让嵌套结构看得清。\n'+
+    '只改空格和换行，不改代码逻辑。'],
+  findCode:['查找',
+    '在当前文件里搜索文字，可以跳到上一处 / 下一处。'],
+  copyCode:['复制代码',
+    '把编辑器里的代码复制到剪贴板，可以贴到别处。'],
+  copyMessage:['复制这条消息',
+    '把这条 AI 回复的文字复制到剪贴板。'],
+  copyResult:['复制结果',
+    '把这次 AI 输出的内容复制到剪贴板。'],
+  file:['打开文件',
+    '点开这个文件开始编辑。'],
+  localModels:['本地模型',
+    '管理离线模型：下载、导入、删除，以及调推理参数。\n\n'+
+    '本地模型不联网、不用密钥、不花钱，但速度取决于手机算力。'],
+  cancel:['取消',
+    '中断正在跑的 AI 请求或绘图任务。\n\n'+
+    '云端接口取消后服务端可能仍会计费，这次用量会标为「未知」。'],
+  stopAuto:['停止联动',
+    '停下自动联动。已经发给 Studio 的任务不会撤回，\n'+
+    '需要你自己去 Studio 页面核对现在做到哪一步了。'],
+  localInspect:['读取文件列表',
+    '在一行里填 Hugging Face 的「组织名/仓库名」，然后点这个按钮，\n'+
+    '去那个仓库里看看有哪些可以下载的 .litertlm 模型文件。\n\n'+
+    '只是列个清单，不下载。列表会显示每个文件的名字和大小（一般 3~5 GB）。\n\n'+
+    '如果提示读取失败，多半是网络或仓库名填错了。受限模型（要同意许可的）\n'+
+    '需要先在 Hugging Face 网页上点同意，再把只读令牌填进下面那栏。'],
+  localDownload:['下载并校验',
+    '把选中的模型文件下载到手机里。\n\n'+
+    '· 支持断点续传：中断了再点一次，会从断的地方接着下，不用重来\n'+
+    '· 下完自动校验 SHA-256，对不上会删掉重下，防止用到损坏的文件\n'+
+    '· 下载期间可以点「暂停」，已下载的部分保留\n\n'+
+    '文件通常 3~5 GB，建议连 WiFi。手机至少要留出文件大小 + 512MB 的空间。'],
+  localImport:['导入本地模型',
+    '从手机存储里选一个已经下载好的 .litertlm 文件导入。\n\n'+
+    '适合：用电脑下好了再传到手机、或者从别处拿到的模型文件。\n'+
+    '文件必须是 LiteRT-LM 格式，其他格式（.gguf / .safetensors 等）不能用。'],
+  localSelect:['保存并用于 AI 助手',
+    '把下面这些参数保存下来，并把当前选中的模型设为 AI 助手的默认模型。\n\n'+
+    '可调参数：\n'+
+    '· 执行后端 —— GPU 快但吃电，CPU 稳但慢\n'+
+    '· 上下文 Token —— 能记住多长的对话，越大越吃内存\n'+
+    '· 最大输出 —— 一次最多生成多少字\n'+
+    '· 温度 / Top-K / Top-P —— 影响回答的随机性\n\n'+
+    '拿不准就点「官方参数」按钮，它会填入推荐值。'],
+  localDelete:['删除模型',
+    '把这个模型文件从手机上删掉，腾出空间。\n'+
+    '删了以后要重新下载才能用。'],
+  localDefaults:['官方参数',
+    '把参数填成官方推荐的默认值（温度 1 / Top-K 64 / Top-P 0.95 / 32K 上下文）。\n'+
+    '不知道该怎么调的时候用这个就行。'],
   cloudCancel:['取消同步',
     '中止正在进行的云端上传或下载。已经传完的部分保留。']
+};
+
+/*
+ * 返回键处理。
+ *
+ * 原生侧点返回时会先调 window.backLocal()，返回 true 表示「我自己处理了」，
+ * 返回 false 才继续走原生的返回逻辑（回上一页 / 询问退出）。
+ *
+ * 这里只做一件事：如果说明框还开着，关掉它并吃掉这次返回。
+ * 不加这段的话，说明框开着时按返回键会直接触到「是否退出应用」，体验很糟。
+ */
+window.backLocal=function(){
+  const masks=document.querySelectorAll('.explain-mask');
+  if(masks.length){
+    masks[masks.length-1].remove();
+    return true;
+  }
+  return false;
 };
 
 /* 拦截器：返回 true 表示已弹框拦截，动作先不执行 */
@@ -304,6 +411,7 @@ function explainGuard(a,b){
 /* 弹说明框 */
 function showExplain(key,title,body,btn){
   const mask=document.createElement('div');
+  mask.className='explain-mask';   // 统一 class，方便返回键处理时找到它
   mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:99999;'+
     'display:flex;align-items:center;justify-content:center;padding:22px;overflow:auto';
   const card=document.createElement('div');

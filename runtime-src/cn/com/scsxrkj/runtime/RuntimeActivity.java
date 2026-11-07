@@ -170,16 +170,27 @@ public class RuntimeActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(meta.optString("name", "App"));
         title.setTextColor(0xff173d35);
-        title.setPadding(24, 10, 0, 10);
+        title.setPadding(dp(16), dp(6), 0, dp(6));
+        title.setTextSize(16);
         // weight=1 让标题占满剩余宽度，「⋯」按钮固定在右边。
         bar.addView(title, new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
 
+        // 右上角「⋯」按钮：打开应用与调试菜单。
+        // 这里刻意去掉系统默认的按钮背景 —— 默认样式是灰色圆角方块，
+        // 放在浅色页面上很突兀。改成透明背景 + 只显示文字，和整体风格一致。
         Button menu = new Button(this);
         menu.setText("⋯");
+        menu.setTextSize(20);
+        menu.setTextColor(0xff173d35);          // 和标题同色
         menu.setContentDescription("应用与调试");
+        menu.setBackgroundColor(Color.TRANSPARENT);
+        menu.setMinWidth(0);
+        menu.setMinimumWidth(0);
+        menu.setPadding(0, 0, 0, 0);
+        menu.setStateListAnimator(null);        // 去掉按下时的高浮雕动画
         menu.setOnClickListener(v -> menu());
-        bar.addView(menu, new LinearLayout.LayoutParams(150, 150));
+        bar.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(48)));
         root.addView(bar);
 
         // --- 页面容器 ---------------------------------------------------
@@ -357,6 +368,11 @@ public class RuntimeActivity extends Activity {
     // ==================================================================
     // 工具方法
     // ==================================================================
+
+    /** 把 dp 换算成像素，保证不同屏幕密度下尺寸一致。 */
+    int dp(int n) {
+        return Math.round(getResources().getDisplayMetrics().density * n);
+    }
 
     /** 读取 APK 内 assets 下的文本文件。 */
     String read(String f) throws Exception {
