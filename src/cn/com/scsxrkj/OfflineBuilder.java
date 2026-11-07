@@ -17,7 +17,7 @@ import javax.security.auth.x500.X500Principal;
 final class OfflineBuilder {
  static JSONObject build(MainActivity c,JSONObject p,int number)throws Exception{
   JSONObject compiled=LocalCompiler.compile(c,p);JSONObject outputFiles=compiled.getJSONObject("files");validateOutput(outputFiles);
-  String id=p.getString("id");if(!id.matches("[a-zA-Z0-9_-]{1,100}"))throw new Exception("项目 ID 不适合打包");String suffix=id.replaceAll("[^a-zA-Z0-9]","").toLowerCase(Locale.ROOT);if(suffix.length()<20)suffix=UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");String pkg="com.scsxrkj.app."+suffix.substring(0,20),version="0.1."+(number-1);
+  String id=p.getString("id");if(!id.matches("[a-zA-Z0-9_-]{1,100}"))throw new Exception("项目 ID 不适合打包");String suffix=id.replaceAll("[^a-zA-Z0-9]","").toLowerCase(Locale.ROOT);if(suffix.length()<20)suffix=UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");suffix=suffix.substring(0,19);if(!Character.isLetter(suffix.charAt(0)))suffix="p"+suffix;String pkg="com.scsxrkj.app."+suffix,version="0.1."+(number-1);
   File dir=new File(c.getFilesDir(),"builds");dir.mkdirs();File unsigned=new File(dir,id+"-unsigned.apk"),output=new File(dir,id+"-"+number+".apk");
   JSONObject files=p.getJSONObject("files");if(files.has("neo-matrix.json"))cn.com.scsxrkj.matrix.MatrixSpec.parse(files.getString("neo-matrix.json"));if(!files.has("index.html"))throw new Exception("项目缺少 index.html");
   try(ZipInputStream in=new ZipInputStream(c.getAssets().open("runtime-template.apk"));ZipOutputStream out=new AlignedZip(new Counter(new FileOutputStream(unsigned)))){
