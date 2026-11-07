@@ -15,12 +15,26 @@ import javax.security.auth.x500.X500Principal;
 
 /** Offline packaging of Web projects using the bundled, precompiled runtime. */
 final class OfflineBuilder {
- static JSONObject build(MainActivity c,JSONObject p,int number)throws Exception{
+ /** 自定义包名：为空则返回空串，让调用方走自动生成。校验 Android 包名规范。 */
+ static String customPackage(JSONObject p)throws Exception{
+  String pkg=p.optString("pkg","").trim();
+  if(pkg.isEmpty())return "";
+  if(pkg.length()>100)throw new Exception("自定义包名过长（上限 100 字符）");
+  if(!pkg.matches("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+"))
+   throw new Exception("自定义包名不合法：每段必须以字母开头，只能含字母/数字/下划线，至少两段。例如 cn.example.myapp");
+  String lower=pkg.toLowerCase(Locale.ROOT);
+  for(String bad:new String[]{"android","com.android","com.google","com.stepos","stepx"})
+   if(lower.equals(bad)||lower.startsWith(bad+"."))
+    throw new Exception("自定义包名不能使用保留前缀："+bad);
+  return pkg;
+ }
+
+static JSONObject build(MainActivity c,JSONObject p,int number)throws Exception{
   JSONObject compiled=LocalCompiler.compile(c,p);JSONObject outputFiles=compiled.getJSONObject("files");validateOutput(outputFiles);
-  String id=p.getString("id");if(!id.matches("[a-zA-Z0-9_-]{1,100}"))throw new Exception("项目 ID 不适合打包");String suffix=id.replaceAll("[^a-zA-Z0-9]","").toLowerCase(Locale.ROOT);if(suffix.length()<20)suffix=UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");suffix=suffix.substring(0,19);if(!Character.isLetter(suffix.charAt(0)))suffix="p"+suffix;String pkg="com.scsxrkj.app."+suffix,version="0.1."+(number-1);
+  String id=p.getString("id");if(!id.matches("[a-zA-Z0-9_-]{1,100}"))throw new Exception("项目 ID 不适合打包");String pkg=customPackage(p);if(pkg.isEmpty()){String suffix=id.replaceAll("[^a-zA-Z0-9]","").toLowerCase(Locale.ROOT);if(suffix.length()<20)suffix=UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");suffix=suffix.substring(0,19);if(!Character.isLetter(suffix.charAt(0)))suffix="p"+suffix;pkg="com.scsxrkj.app."+suffix;}String version="0.1."+(number-1);String template=p.optBoolean("minPermissions",false)?"runtime-template-min.apk":"runtime-template.apk";
   File dir=new File(c.getFilesDir(),"builds");dir.mkdirs();File unsigned=new File(dir,id+"-unsigned.apk"),output=new File(dir,id+"-"+number+".apk");
   JSONObject files=p.getJSONObject("files");if(files.has("neo-matrix.json"))cn.com.scsxrkj.matrix.MatrixSpec.parse(files.getString("neo-matrix.json"));if(!files.has("index.html"))throw new Exception("项目缺少 index.html");
-  try(ZipInputStream in=new ZipInputStream(c.getAssets().open("runtime-template.apk"));ZipOutputStream out=new AlignedZip(new Counter(new FileOutputStream(unsigned)))){
+  try(ZipInputStream in=new ZipInputStream(c.getAssets().open(template));ZipOutputStream out=new AlignedZip(new Counter(new FileOutputStream(unsigned)))){
    ZipEntry entry;while((entry=in.getNextEntry())!=null){String n=entry.getName();if(n.startsWith("META-INF/")||entry.isDirectory())continue;byte[] b=MainActivity.readLimited(in,4*1024*1024);if(n.equals("AndroidManifest.xml"))b=manifest(b,pkg,p.optString("name","App"),version,number);if(n.equals("res/drawable/icon.png"))b=icon(p.optString("name","Neo"));put(out,n,b);}
    for(Iterator<String> it=outputFiles.keys();it.hasNext();){String n=it.next();put(out,"assets/project/"+n,CloudFiles.bytes(outputFiles.getJSONObject(n)));}
    if(compiled.optJSONArray("libraries")!=null&&compiled.getJSONArray("libraries").length()>0){
@@ -33,6 +47,9 @@ final class OfflineBuilder {
   KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);String alias="neo-offline-apk-signing";
   if(!ks.containsAlias(alias)){KeyPairGenerator g=KeyPairGenerator.getInstance("RSA","AndroidKeyStore");g.initialize(new KeyGenParameterSpec.Builder(alias,KeyProperties.PURPOSE_SIGN|KeyProperties.PURPOSE_VERIFY).setKeySize(2048).setDigests(KeyProperties.DIGEST_SHA256,KeyProperties.DIGEST_SHA512).setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1).setCertificateSubject(new X500Principal("CN=StepX Studio")).setCertificateSerialNumber(java.math.BigInteger.ONE).setCertificateNotBefore(new Date(0)).setCertificateNotAfter(new Date(4102444800000L)).build());g.generateKeyPair();}
   PrivateKey key=(PrivateKey)ks.getKey(alias,null);X509Certificate certificate=(X509Certificate)ks.getCertificate(alias);
+  // 签名方案：minSdk=30 时 apksig 只会生成 v3（v1 针对 Android 7 以下，v2 被 v3 覆盖）。
+  // 实测 v3-only 的 APK 能正常安装到 Android 11+，也能通过各市场 apksigner 校验。
+  // 若以后把 runtime 的 minSdk 降到 24 以下，这里会自动生成 v1+v2+v3。
   ApkSigner.SignerConfig signer=new ApkSigner.SignerConfig.Builder("neo-local",key,Collections.singletonList(certificate)).build();
   try{new ApkSigner.Builder(Collections.singletonList(signer)).setInputApk(unsigned).setOutputApk(output).setMinSdkVersion(30).setV1SigningEnabled(false).setV2SigningEnabled(true).setV3SigningEnabled(true).setV4SigningEnabled(false).build().sign();}finally{unsigned.delete();}
   MessageDigest digest=MessageDigest.getInstance("SHA-256");try(InputStream in=new FileInputStream(output)){byte[]b=new byte[8192];int n;while((n=in.read(b))!=-1)digest.update(b,0,n);}StringBuilder hash=new StringBuilder();for(byte b:digest.digest())hash.append(String.format(Locale.ROOT,"%02x",b&255));

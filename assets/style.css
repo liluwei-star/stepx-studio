@@ -86,3 +86,8 @@ html[data-appearance=contrast] .tag{background:#333;color:#fff;border-color:#aaa
 .art-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.art-asset{display:flex;flex-direction:column;gap:6px;min-width:0}.art-asset img{width:100%;aspect-ratio:1;object-fit:contain;border-radius:10px;background:#202024}.art-asset strong,.art-asset code{overflow-wrap:anywhere;font-size:11px}.art-asset small{font-size:10px}
 
 .project-relay{font-size:10px;padding:6px;flex-shrink:0;white-space:nowrap;min-width:0}.project-open{min-width:0}.project-open .grow{min-width:0}.project-open strong{overflow-wrap:anywhere}
+
+/* 构建页：自定义包名与最小权限选项 */
+.field{display:block;margin:12px 0 4px}
+.field input[type=text],.field input:not([type]){margin-top:6px}
+.field input[type=checkbox]{display:inline-block;width:20px;min-height:20px;margin:0 8px 0 0;vertical-align:middle}
