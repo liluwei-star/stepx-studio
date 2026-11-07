@@ -5,6 +5,8 @@ import android.os.*;
 import android.net.Uri;
 import org.json.*;
 import java.util.*;
+import java.io.File;
+import java.util.Iterator;
 import java.nio.charset.StandardCharsets;
 /**
  * 本地与官方 Studio 云端的项目传输。
@@ -14,9 +16,9 @@ import java.nio.charset.StandardCharsets;
  * 也不碰任何私有接口。
  */
 final class CloudProjects {
- CloudRelay relay;final MainActivity a;boolean running,batchRunning,batchStopped;int batchIndex=-1;JSONObject batch;int generation;ProgressDialog dialog;
+ CloudRelay relay;final MainActivity a;/** 大文件通道：Studio 网页与原生暂存区之间的桥。 */final CloudNativeBridge nativeBridge;boolean running,batchRunning,batchStopped;int batchIndex=-1;JSONObject batch;int generation;ProgressDialog dialog;
  interface Result{void accept(JSONObject r)throws Exception;}
- CloudProjects(MainActivity a){this.a=a;try{JSONObject saved=a.state.optJSONObject("cloudBatch");if(saved!=null&&saved.optBoolean("running")){CloudQueue.end(saved,true);a.saveState();}}catch(Exception ignored){}}
+ CloudProjects(MainActivity a){this.a=a;this.nativeBridge=new CloudNativeBridge(a);try{JSONObject saved=a.state.optJSONObject("cloudBatch");if(saved!=null&&saved.optBoolean("running")){CloudQueue.end(saved,true);a.saveState();}}catch(Exception ignored){}}
  boolean busy(){return running||batchRunning||relay!=null;}
  void ready()throws Exception{if((a.art!=null&&a.art.busy)||running||a.active!=null||a.building||IntegrationActivity.busy||a.pendingHandoff!=null||(a.link!=null&&a.link.running)||(a.studioUsage!=null&&a.studioUsage.running))throw new Exception("请先结束当前AI、联动、构建或同步任务");String u=a.studio.getUrl();if(u==null||!"https".equals(Uri.parse(u).getScheme())||!"studio.stepx.com".equals(Uri.parse(u).getHost())){a.show("studio");throw new Exception("请先打开并登录官方 Studio，再同步");}}
 
@@ -33,11 +35,57 @@ final class CloudProjects {
  void list(){try{available();execute(op("list"),r->{JSONArray ps=r.getJSONArray("projects");if(ps.length()==0){a.toast("当前账号还没有云端项目");return;}String[]labels=new String[ps.length()];for(int i=0;i<ps.length();i++)labels[i]=ps.getJSONObject(i).optString("name");new AlertDialog.Builder(a).setTitle("同步云端项目到本地").setItems(labels,(d,n)->{try{pull(ps.getJSONObject(n).getString("id"));}catch(Exception e){fail(e);}}).setNegativeButton("取消",null).show();});}catch(Exception e){fail(e);}}
  JSONObject find(String cloudId)throws Exception{JSONArray ps=a.state.getJSONArray("projects");for(int i=0;i<ps.length();i++){JSONObject p=ps.getJSONObject(i),c=p.optJSONObject("cloud");if(c!=null&&cloudId.equals(c.optString("id")))return p;}return null;}
  void pullLocal(String id)throws Exception{JSONObject p=a.byId("projects",id),c=p.optJSONObject("cloud");if(c==null){list();return;}pull(c.getString("id"));}
+ /**
+  * 把暂存区里的大文件搬进项目的大文件目录。
+  *
+  * <p>云端同步的大文件先落在暂存区（{@code filesDir/cloud-staging/}），
+  * 那是一次性的中转。合并进项目之前必须搬到 {@code filesDir/project-files/}，
+  * 否则暂存区一清，项目里的大文件就变成空指针了。
+  *
+  * <p>搬完之后，条目的 {@code ref} 从「暂存区路径」改成
+  * 「项目大文件文件名（.bin 结尾）」，和 {@link CloudFiles} 的约定一致。
+  *
+  * @param projectId 云端项目 id
+  * @param entries   待合并的条目集合（会被就地修改）
+  */
+ void materializeBig(String projectId,JSONObject entries)throws Exception{
+  CloudStaging staging=new CloudStaging(a.getFilesDir());
+  for(Iterator<String>i=entries.keys();i.hasNext();){
+   String n=i.next();
+   JSONObject e=entries.optJSONObject(n);
+   if(e==null||!e.has("ref"))continue;
+   String ref=e.getString("ref");
+   if(ref.endsWith(".bin"))continue;          // 已经是项目里的引用
+   byte[] raw=staging.read(projectId,ref);
+   String name=CloudFiles.bigName(n);
+   JSONObject stored=CloudFiles.writeBig(a.getFilesDir(),name,raw);
+   // 条目改成项目内引用，sha256 一并更新为原生算出来的值
+   e.put("ref",stored.getString("ref"));
+   if(e.isNull("sha256"))e.put("sha256",stored.getString("sha256"));
+  }
+ }
+
  void pull(String id)throws Exception{available();JSONObject old=find(id);final String localId=old==null?"":old.getString("id");final JSONObject before=old==null?new JSONObject():CloudFiles.entries(old);
   execute(op("pull").put("projectId",id),r->{JSONObject remote=r.getJSONObject("entries"),meta=r.getJSONObject("project");CloudFiles.validate(remote);JSONObject p;
    synchronized(a){JSONObject backup=new JSONObject(a.state.toString());try{if(localId.isEmpty()){p=new JSONObject().put("id",UUID.randomUUID().toString()).put("name",meta.getString("name")).put("files",new JSONObject()).put("cloudSource",true);}else{p=new JSONObject(a.byId("projects",localId).toString());if(!ProjectEdits.same(CloudFiles.hashes(before),CloudFiles.hashes(CloudFiles.entries(p))))throw new Exception("同步期间本地文件已修改，没有覆盖");}
-    JSONObject c=p.optJSONObject("cloud"),base=c==null?new JSONObject():c.optJSONObject("base");if(base==null)base=new JSONObject();JSONObject merged=CloudFiles.merge(before,remote,base);if(!localId.isEmpty())CloudFiles.snapshot(p);CloudFiles.assign(p,merged);p.put("updated",System.currentTimeMillis()).put("cloudSource",true).put("studioUrl",url(meta));p.put("cloud",new JSONObject().put("id",id).put("name",meta.getString("name")).put("builderType",meta.optString("builderType","app")).put("base",CloudFiles.hashes(remote)).put("lastPull",System.currentTimeMillis()).put("skipped",r.optJSONArray("skipped")).put("message","已同步 "+remote.length()+" 个云端源文件；本地独立修改保留"));a.upsert("projects",p);
+    JSONObject c=p.optJSONObject("cloud"),base=c==null?new JSONObject():c.optJSONObject("base");if(base==null)base=new JSONObject();
+    // 大文件先从暂存区搬进项目的大文件目录，再参与合并 ——
+    // 暂存区是一次性的，合并后项目必须自给自足。
+    materializeBig(id,remote);
+    JSONObject merged=CloudFiles.merge(before,remote,base);if(!localId.isEmpty())CloudFiles.snapshot(p);CloudFiles.assign(p,merged,a.getFilesDir());p.put("updated",System.currentTimeMillis()).put("cloudSource",true).put("studioUrl",url(meta));p.put("cloud",new JSONObject().put("id",id).put("name",meta.getString("name")).put("builderType",meta.optString("builderType","app")).put("base",CloudFiles.hashes(remote)).put("lastPull",System.currentTimeMillis()).put("skipped",r.optJSONArray("skipped")).put("message","已同步 "+remote.length()+" 个云端源文件；本地独立修改保留"));a.upsert("projects",p);
    }catch(Exception e){a.state=backup;throw e;}}
+   // 大文件落盘情况记到日志。排障时能直接看出哪个大文件、多大、哈希多少，
+   // 不用去翻应用私有目录。
+   try{
+    JSONObject bh=p.optJSONObject("bigHashes"),bf=p.optJSONObject("binaryFiles");
+    if(bh!=null&&bf!=null)for(Iterator<String>i=bh.keys();i.hasNext();){
+     String n=i.next();
+     String ref=bf.optString(n,""),sha=bh.optString(n,"");
+     long sz=-1;
+     try{sz=new File(a.getFilesDir(),"project-files/"+ref).length();}catch(Exception ignored){}
+     android.util.Log.i("NeoCloudBig","大文件 "+n+" 大小="+sz+" 字节 哈希="+(sha.length()>16?sha.substring(0,16):sha));
+    }
+   }catch(Exception ignored){}
    a.sendState();a.event("projectOpen",p.getString("id"));a.toast("已同步 "+remote.length()+" 个文件"+(r.optJSONArray("skipped").length()>0?"；已排除依赖、构建产物或敏感文件，详见同步记录":""));
   });
  }
@@ -61,16 +109,112 @@ final class CloudProjects {
  void prepareUpload(String localId,String id)throws Exception{ready();final CloudRelay expectedRelay=relay;final JSONObject source=CloudFiles.entries(a.byId("projects",localId));if(source.length()==0)throw new Exception("项目没有可上传文件");
   execute(op("pull").put("projectId",id).put("initialize",a.byId("projects",localId).getJSONObject("cloud").optBoolean("newUpload")),r->{if(expectedRelay!=null&&relay!=expectedRelay)return;JSONObject target=a.byId("projects",localId),c=target.getJSONObject("cloud");if(!id.equals(c.getString("id")))throw new Exception("项目关联已变化");JSONObject remote=r.getJSONObject("entries"),expected=CloudFiles.hashes(remote),base=c.getJSONObject("base"),changes=new JSONObject();CloudFiles.validate(remote);if(c.optBoolean("newUpload")&&!c.optBoolean("prepared")){for(Iterator<String>it=source.keys();it.hasNext();){String n=it.next();if(expected.has(n))base.put(n,expected.get(n));}c.put("prepared",true);a.saveState();}ArrayList<String>conflicts=new ArrayList<>();
    for(Iterator<String>i=source.keys();i.hasNext();){String n=i.next(),l=CloudFiles.h(source,n),v=CloudFiles.h(remote,n);if(l.equals(v))continue;if(!v.equals(base.optString(n,"")))conflicts.add(n);else changes.put(n,source.get(n));}
-   if(!conflicts.isEmpty())throw new Exception("云端文件已变化，请先同步到本地解决冲突："+String.join("、",conflicts));
+   if(!conflicts.isEmpty())throw new Exception("云端文件已变化，请先同步到本地解决冲突："+CloudFiles.join(conflicts));
    if(changes.length()==0){recordUpload(localId,id,source,remote,new JSONArray(),true);a.toast("文件内容一致，无需上传");completeRelay(localId);completeBatchItem(true,"文件内容一致，无需上传");return;}
    ready();if(batchRunning&&batchStopped)throw new Exception("已停止后续上传");if(!ProjectEdits.same(CloudFiles.hashes(source),CloudFiles.hashes(CloudFiles.entries(a.byId("projects",localId)))))throw new Exception("本地文件已变化，请重新上传");execute(op("upload").put("projectId",id).put("entries",changes).put("expected",expected),out->{JSONArray written=out.getJSONArray("written");recordUpload(localId,id,source,remote,written,out.optBoolean("complete"));if(!out.optBoolean("complete")){a.byId("projects",localId).getJSONObject("cloud").put("message",out.optString("error"));a.saveState();a.sendState();a.event("cloudUpdated",localId);throw new Exception(out.optString("error"));}a.toast("上传完成，已回读核验 "+written.length()+" 个文件");completeRelay(localId);completeBatchItem(true,"已回读核验 "+written.length()+" 个文件");});
   });
  }
  void recordUpload(String localId,String id,JSONObject source,JSONObject remote,JSONArray written,boolean complete)throws Exception{JSONObject p=a.byId("projects",localId),c=p.getJSONObject("cloud");if(!id.equals(c.getString("id")))throw new Exception("项目关联已变化");JSONObject base=c.getJSONObject("base");for(Iterator<String>i=source.keys();i.hasNext();){String n=i.next();if(CloudFiles.h(source,n).equals(CloudFiles.h(remote,n)))base.put(n,CloudFiles.h(source,n));}for(int i=0;i<written.length();i++){String n=written.getString(i);base.put(n,CloudFiles.h(source,n));}c.put("base",base).put("lastUpload",System.currentTimeMillis()).put("message",complete?"上传完成，文件已回读核验":"上传未完成，已核验 "+written.length()+" 个文件；请重新核对后继续");if(complete)c.remove("newUpload");a.saveState();a.sendState();a.event("cloudUpdated",localId);}
- void execute(JSONObject op,Result result)throws Exception{if(running)throw new Exception("同步进行中");String js=new String(MainActivity.readLimited(a.getAssets().open("cloud-projects.js"),64000),StandardCharsets.UTF_8),url=a.studio.getUrl();running=true;int id=++generation;dialog=new ProgressDialog(a);dialog.setTitle(batchRunning?"上传同步 "+(batchIndex+1)+" / "+batch.getJSONArray("items").length():"Studio 项目同步");dialog.setMessage("正在连接…");dialog.setCancelable(false);dialog.setButton(DialogInterface.BUTTON_NEGATIVE,"停止",(d,n)->cancel());dialog.show();
-  a.studio.evaluateJavascript("(()=>{"+js+";window.__neoCloudController=new AbortController();window.__neoCloudResult=null;window.__neoCloudProgress='连接云端';NeoCloud.run("+op+",window.__neoCloudController.signal,p=>window.__neoCloudProgress=p).then(r=>window.__neoCloudResult={ok:true,data:r}).catch(e=>window.__neoCloudResult={ok:false,error:e.message});})();void 0",null);poll(id,url,System.currentTimeMillis()+240000,result);
- }
- void poll(int id,String url,long deadline,Result callback){new Handler(a.getMainLooper()).postDelayed(()->{if(id!=generation||a.isDestroyed())return;if(!Objects.equals(url,a.studio.getUrl())){finish();fail(new Exception("Studio 页面已变化；若在上传，请重新核对云端文件"));return;}a.studio.evaluateJavascript("({result:window.__neoCloudResult||null,progress:window.__neoCloudProgress||''})",s->{if(id!=generation)return;try{JSONObject v=new JSONObject(s);if(dialog!=null)dialog.setMessage(v.optString("progress"));if(v.isNull("result")){if(System.currentTimeMillis()>deadline){if(System.currentTimeMillis()>deadline+5000){++generation;finish();fail(new Exception("同步超时；上传结果可能部分完成，请重新核对云端文件"));return;}cancel();}poll(id,url,deadline,callback);return;}JSONObject r=v.getJSONObject("result");finish();if(!r.optBoolean("ok"))throw new Exception(r.optString("error"));callback.accept(r.getJSONObject("data"));}catch(Exception e){finish();fail(e);}});},250);}
+ /**
+ * 执行一次云端同步操作。
+ *
+ * <p>结果通过 {@code window.__neoCloudResult} 变量回传，再由 {@link #poll} 读走。
+ * 这是唯一的数据通道 —— 大文件不能走这里（会 OOM），所以大文件由 JS 侧
+ * 分块传给原生暂存区，见 {@link CloudStaging}。
+ *
+ * <p>执行前会把 {@code window.NeoCloudNative} 桥接注入到 Studio 网页上，
+ * 供 JS 侧调用 {@code cloudBegin / cloudAppend / cloudSize / cloudRead}。
+ *
+ * @param op     操作描述（list / pull / create / upload）
+ * @param result 结果回调
+ */
+void execute(JSONObject op,Result result)throws Exception{
+ if(running)throw new Exception("同步进行中");
+ String js=new String(MainActivity.readLimited(a.getAssets().open("cloud-projects.js"),64000),StandardCharsets.UTF_8),url=a.studio.getUrl();
+ running=true;int id=++generation;
+ dialog=new ProgressDialog(a);
+ dialog.setTitle(batchRunning?"上传同步 "+(batchIndex+1)+" / "+batch.getJSONArray("items").length():"Studio 项目同步");
+ dialog.setMessage("正在连接…");dialog.setCancelable(false);
+ dialog.setButton(DialogInterface.BUTTON_NEGATIVE,"停止",(d,n)->cancel());dialog.show();
+
+ /*
+  * 把同步脚本拼成一个完整的 JavaScript 表达式，一次性注入页面。
+  *
+  * <p>为什么必须一次拼好再注入：
+  * <ul>
+  *   <li>拆成多次 evaluateJavascript，网页里的执行顺序不保证，
+  *       会出现「Promise 包装还没建好，请求就发出去了」</li>
+  *   <li>整个脚本是一个表达式，只要有一处语法错误，
+  *       WebView 会在解析期就拒绝它 —— try/catch 也接不住，
+  *       结果是页面里什么都没发生，同步永远卡在「连接云端」</li>
+  * </ul>
+  *
+  * <p>脚本结构：
+  * <pre>
+  * (()=&gt;{
+  *   [Promise 包装]              给原生接口套上可 await 的 Promise
+  *   try{ [桥接自检] }catch{}
+  *   try{
+  *     [同步脚本]                var NeoCloud = ...
+  *     window.__neoCloudController = new AbortController();
+  *     window.__neoCloudResult = null;
+  *     window.__neoCloudProgress = '连接云端';
+  *     NeoCloud.run(op, signal, progress).then(...).catch(...);
+  *   }catch(e){ window.__neoCloudResult = {ok:false,error:...}; }
+  * })();
+  * </pre>
+  */
+ StringBuilder sb=new StringBuilder();
+ // 整个脚本是一个立即执行函数表达式。
+ // 必须是一个表达式 —— evaluateJavascript 传的就是一段 JS 源码，
+ // 任何一处语法错误都会让整段在解析期被拒绝。
+ sb.append("(()=>{");
+ // ① Promise 包装（读 assets/cloud-bridge.js，不写成 Java 字符串）
+ sb.append(nativeBridge.promiseWrapper());
+ // ② 桥接自检：确认 JS → 原生 → JS 这条链真的通。
+ //    单独一层 try/catch，自检失败不影响真正的同步。
+ sb.append("try{");
+ sb.append("window.__neoBridgeTest=null;");
+ sb.append("window.NeoCloudNative.cloudBegin('p_bridge','test/bridge.bin').then(()=>{");
+ sb.append("const b=new Uint8Array(1048576);for(let i=0;i<b.length;i+=1024)b[i]=i&255;");
+ sb.append("let s='';const CH=65536;for(let i=0;i<b.length;i+=CH)");
+ sb.append("s+=String.fromCharCode.apply(null,b.subarray(i,Math.min(b.length,i+CH)));");
+ sb.append("return window.NeoCloudNative.cloudAppend('p_bridge','test/bridge.bin',btoa(s));})");
+ sb.append(".then(()=>window.NeoCloudNative.cloudEnd('p_bridge','test/bridge.bin'))");
+ sb.append(".then(()=>window.NeoCloudNative.cloudSize('p_bridge','test/bridge.bin'))");
+ sb.append(".then(sz=>{window.__neoBridgeTest={ok:sz===1048576,size:sz,error:sz===1048576?'':'大小不符 '+sz};})");
+ sb.append(".catch(e=>{window.__neoBridgeTest={ok:false,error:e.message};});");
+ sb.append("}catch(e){window.__neoBridgeTest={ok:false,error:String(e&&e.message||e)};}");
+ // ③ 同步脚本本体。它是 `var NeoCloud = (()=>{...})();` 的形式，
+ //    自身完整，不需要再套 try。
+ sb.append(js);
+ sb.append(";window.__neoCloudController=new AbortController();");
+ sb.append("window.__neoCloudResult=null;");
+ sb.append("window.__neoCloudProgress='连接云端';");
+ // ④ 发起请求。try/catch 只包住 run 这一句，
+ //    捕获同步启动阶段的同步异常（比如 API 路径变了）。
+ sb.append("try{");
+ sb.append("NeoCloud.run(").append(op).append(",window.__neoCloudController.signal,");
+ sb.append("p=>window.__neoCloudProgress=p)");
+ sb.append(".then(r=>window.__neoCloudResult={ok:true,data:r})");
+ sb.append(".catch(e=>window.__neoCloudResult={ok:false,error:String(e&&e.message||e)});");
+ sb.append("}catch(e){window.__neoCloudResult={ok:false,error:'脚本异常: '+String(e&&e.message||e)};}");
+ sb.append("})();void 0");
+ String script=sb.toString();
+
+ android.util.Log.i("NeoCloudSync","注入同步脚本，操作="+op);
+
+ a.studio.evaluateJavascript(script,null);
+ poll(id,url,System.currentTimeMillis()+900000,result);
+}
+ void poll(int id,String url,long deadline,Result callback){new Handler(a.getMainLooper()).postDelayed(()->{if(id!=generation||a.isDestroyed())return;if(!Objects.equals(url,a.studio.getUrl())){finish();fail(new Exception("Studio 页面已变化；若在上传，请重新核对云端文件"));return;}a.studio.evaluateJavascript("({result:window.__neoCloudResult||null,progress:window.__neoCloudProgress||'',bridge:window.__neoBridgeTest||null})",s->{if(id!=generation)return;try{JSONObject v=new JSONObject(s);if(dialog!=null)dialog.setMessage(v.optString("progress"));
+if(v.isNull("result")){if(System.currentTimeMillis()>deadline){if(System.currentTimeMillis()>deadline+5000){++generation;finish();fail(new Exception("同步超时；上传结果可能部分完成，请重新核对云端文件"));return;}cancel();}poll(id,url,deadline,callback);return;}JSONObject r=v.getJSONObject("result");
+  android.util.Log.i("NeoCloudSync","result ok="+r.optBoolean("ok")+" err="+r.optString("error"));
+  // 桥接自检结果记到日志，方便排查大文件通道是否可用
+  if(v.has("bridge")&&!v.isNull("bridge")){
+   try{JSONObject b=v.getJSONObject("bridge");android.util.Log.i("NeoCloudBridge","bridge ok="+b.optBoolean("ok")+" size="+b.optLong("size")+" ms="+b.optLong("ms")+" err="+b.optString("error"));}catch(Exception ignored){}
+  }
+  finish();if(!r.optBoolean("ok"))throw new Exception(r.optString("error"));callback.accept(r.getJSONObject("data"));}catch(Exception e){finish();fail(e);}});},250);}
  void finish(){running=false;if(dialog!=null){dialog.dismiss();dialog=null;}a.studio.evaluateJavascript("delete window.__neoCloudResult;delete window.__neoCloudProgress;delete window.__neoCloudController;void 0",null);}
  void cancel(){if(relay!=null){relayStatus("stopped","已停止云端接力；已上传内容保留，可重新核对后继续");relay=null;}if(batchRunning)batchStopped=true;if(!running)return;if(dialog==null){++generation;running=false;return;}a.studio.evaluateJavascript("window.__neoCloudController?.abort();void 0",null);/* Let in-flight upload report verified files before closing. */if(dialog!=null)dialog.setMessage("正在停止；核对已完成文件…");}
  void destroy(){relay=null;++generation;running=false;if(batchRunning){try{CloudQueue.end(batch,true);publishBatch();}catch(Exception ignored){}batchRunning=false;}if(dialog!=null)dialog.dismiss();}

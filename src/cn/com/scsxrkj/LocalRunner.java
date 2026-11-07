@@ -40,7 +40,20 @@ final class LocalRunner {
   compiler=new WebView(a);compiler.getSettings().setJavaScriptEnabled(true);compiler.getSettings().setAllowFileAccess(false);compiler.getSettings().setAllowContentAccess(false);compiler.getSettings().setBlockNetworkLoads(true);
   compiler.setWebViewClient(new WebViewClient(){@Override public WebResourceResponse shouldInterceptRequest(WebView v,WebResourceRequest r){String path=r.getUrl().getPath();if(!r.getUrl().getHost().equals("neo-compiler.invalid"))return blocked();try{if(path.equals("/project.json"))return response("application/json",project.toString().getBytes(StandardCharsets.UTF_8));return asset(path.substring(1));}catch(Exception e){return blocked();}}@Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){return true;}});
   box.addView(compiler,new LinearLayout.LayoutParams(1,1));dialog.setContentView(box);dialog.setOnDismissListener(d->{closed=true;handler.removeCallbacksAndMessages(null);if(compiler!=null){compiler.stopLoading();compiler.destroy();compiler=null;}if(view!=null){view.stopLoading();view.destroy();view=null;}files.clear();});
-  dialog.show();dialog.getWindow().setLayout(-1,-1);dialog.getWindow().setDecorFitsSystemWindows(false);dialog.getWindow().getInsetsController().setSystemBarsAppearance(0,android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);box.setOnApplyWindowInsetsListener((v,in)->{Insets i=in.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());box.setPadding(i.left,i.top,i.right,i.bottom);return in;});box.requestApplyInsets();
+  dialog.show();
+  // 对话框也铺满全屏。API 30 起才有 setDecorFitsSystemWindows，
+  // 低版本用旧的 systemUiVisibility 标志达到同样效果。
+  dialog.getWindow().setLayout(-1,-1);
+  if(android.os.Build.VERSION.SDK_INT>=30){
+   dialog.getWindow().setDecorFitsSystemWindows(false);
+   android.view.WindowInsetsController c=dialog.getWindow().getInsetsController();
+   if(c!=null)c.setSystemBarsAppearance(0,24);
+  }else{
+   dialog.getWindow().getDecorView().setSystemUiVisibility(
+     android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+     |android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+     |android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+  }dialog.getWindow().setLayout(-1,-1);dialog.getWindow().setDecorFitsSystemWindows(false);dialog.getWindow().getInsetsController().setSystemBarsAppearance(0,android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);box.setOnApplyWindowInsetsListener((v,in)->{Insets i=in.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());box.setPadding(i.left,i.top,i.right,i.bottom);return in;});box.requestApplyInsets();
   deadline=System.currentTimeMillis()+90000;compiler.loadUrl("https://neo-compiler.invalid/local-runner.html");handler.postDelayed(this::poll,250);
  }
  void poll(){if(closed||compiler==null)return;if(System.currentTimeMillis()>deadline){status.setText("本机编译超时，请关闭后重试或缩小工程。");compiler.stopLoading();return;}compiler.evaluateJavascript("JSON.stringify(window.__neoBuild||null)",raw->{if(closed)return;try{Object parsed=new JSONTokener(raw).nextValue();if(parsed instanceof String&&!parsed.equals("null")){JSONObject result=new JSONObject((String)parsed);if(result.has("error")){record("compile_error",result.getString("error"));status.setText("本机编译失败："+result.getString("error"));return;}if(result.has("files")){JSONObject out=result.getJSONObject("files");long size=0;for(Iterator<String>i=out.keys();i.hasNext();){String n=i.next();if(!CloudFiles.path(n))throw new Exception("非法输出路径");byte[]b=CloudFiles.bytes(out.getJSONObject(n));size+=b.length;if(size>16777216)throw new Exception("编译结果超过16MB");files.put(n,b);}show(result.optString("note"));return;}}handler.postDelayed(this::poll,250);}catch(Exception e){status.setText("本机编译失败："+e.getMessage());}});}

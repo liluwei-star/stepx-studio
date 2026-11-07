@@ -1,6 +1,7 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.util.*;
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import android.util.Base64;
@@ -13,20 +14,196 @@ import android.util.Base64;
  * 不猜哪个对，直接报冲突让用户处理，绝不悄悄覆盖掉别人的改动。
  */
 final class CloudFiles {
+
+ /** 超过这个大小（字节）的文件不存进 JSON，改存成独立文件。 */
+ static final int BIG_THRESHOLD = 256 * 1024;
+ /** 大文件独立存储的目录名（相对 filesDir）。 */
+ static final String BIG_DIR = "project-files";
+ /** 大文件引用的编码标记。 */
+ static final String REF_MARK = "ref";
+
+ /** 判断条目是不是「外部文件引用」。 */
+ static boolean isRef(JSONObject e){return e!=null&&e.has(REF_MARK);}
+
+ /**
+  * 大文件的存储目录。
+  * @param filesDir 应用私有目录
+  */
+ static File bigDir(File filesDir){File d=new File(filesDir,BIG_DIR);if(!d.isDirectory()&&!d.mkdirs())throw new RuntimeException("无法创建大文件目录");return d;}
+
+ /**
+  * 把一个大文件写成独立文件，返回引用对象。
+  * @param filesDir 应用私有目录
+  * @param name 存储名
+  * @param bytes 文件内容
+  * @return {"ref":name,"sha256":"...","size":N}
+  */
+ static JSONObject writeBig(File filesDir,String name,byte[] bytes)throws Exception{
+  File f=new File(bigDir(filesDir),name);
+  try(java.io.FileOutputStream out=new java.io.FileOutputStream(f)){out.write(bytes);}
+  return new JSONObject().put(REF_MARK,name).put("sha256",hash(bytes)).put("size",bytes.length);
+ }
+
+ /**
+  * 读回一个大文件。
+  * @param filesDir 应用私有目录
+  * @param name 存储名
+  */
+ static byte[] readBig(File filesDir,String name)throws Exception{
+  File f=new File(bigDir(filesDir),name);
+  if(!f.isFile())throw new Exception("大文件缺失："+name);
+  long len=f.length();
+  if(len>200L*1024*1024)throw new Exception("大文件过大："+name);
+  byte[] out=new byte[(int)len];
+  try(java.io.RandomAccessFile r=new java.io.RandomAccessFile(f,"r")){r.readFully(out);}
+  return out;
+ }
+
+ /**
+  * 从条目里取出字节。小文件走 content，大文件走外部引用。
+  * @param filesDir 应用私有目录
+  * @param e 条目
+  */
+ static byte[] bytes(File filesDir,JSONObject e)throws Exception{if(isRef(e))return readBig(filesDir,e.getString(REF_MARK));return bytes(e);}
+
+ /**
+  * 为一个大文件生成存储名（路径的 SHA-256 前 16 位）。
+  * @param path 项目内相对路径
+  */
+ static String bigName(String path)throws Exception{return hash(path.getBytes(StandardCharsets.UTF_8)).substring(0,16)+".bin";}
+
+ /**
+  * 把条目集合还原成「路径 → 文字内容」。
+  * @param filesDir 应用私有目录
+  * @param entries 条目集合
+  */
+ static JSONObject readable(File filesDir,JSONObject entries)throws Exception{
+  JSONObject out=new JSONObject();
+  for(Iterator<String>i=entries.keys();i.hasNext();){String n=i.next();out.put(n,new String(bytes(filesDir,entries.getJSONObject(n)),StandardCharsets.UTF_8));}
+  return out;
+ }
+
  static boolean path(String p){if(p==null||p.isEmpty()||p.length()>240||p.startsWith("/")||java.util.regex.Pattern.compile("[\\\\\\x00-\\x1f\\x7f]").matcher(p).find())return false;for(String s:p.split("/",-1))if(s.isEmpty()||s.equals(".")||s.equals(".."))return false;return true;}
  static boolean excluded(String p){return p.matches("(?i)(?:.*/)?(?:\\.git|node_modules|\\.gradle|build|dist|\\.next|\\.cache)(?:/.*)?")||p.matches("(?i)(?:.*/)?(?:\\.env(?:\\..*)?|credentials(?:\\..*)?|secrets?(?:\\..*)?|local\\.properties|capsule\\.properties|id_rsa|id_ed25519)")||p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)");}
+ /**
+  * 把一组名字用顿号连成一句，供报错文案使用。
+  *
+  * <p>不用 String.join —— 那是 API 26 才有的，minSdk 24 用不了。
+  *
+  * @param list 名字列表
+  */
+ static String join(java.util.List<String> list){
+  StringBuilder s=new StringBuilder();
+  for(String n:list){if(s.length()>0)s.append("、");s.append(n);}
+  return s.toString();
+ }
+
+ /**
+  * 流式计算文件的 SHA-256。
+  *
+  * <p>不用 {@code readAllBytes} —— 那样会把整个文件读进堆里，
+  * 一个 100 MB 的模型就能让手机内存吃紧。
+  *
+  * @param f 文件
+  * @return 小写十六进制哈希
+  */
+ static String hashFile(File f)throws Exception{
+  MessageDigest d=MessageDigest.getInstance("SHA-256");
+  try(java.io.FileInputStream in=new java.io.FileInputStream(f)){
+   byte[] buf=new byte[1024*1024];
+   int n;
+   while((n=in.read(buf))!=-1)d.update(buf,0,n);
+  }
+  StringBuilder s=new StringBuilder();
+  for(byte v:d.digest())s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));
+  return s.toString();
+ }
+
  static String hash(byte[] b)throws Exception{StringBuilder s=new StringBuilder();for(byte v:MessageDigest.getInstance("SHA-256").digest(b))s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));return s.toString();}
  static byte[] bytes(JSONObject e)throws Exception{String c=e.getString("content"),encoding=e.getString("encoding");if(encoding.equals("utf8"))return c.getBytes(StandardCharsets.UTF_8);if(encoding.equals("base64"))return Base64.decode(c,Base64.NO_WRAP);throw new Exception("不支持的文件编码");}
  static JSONObject entry(String content,String encoding)throws Exception{JSONObject e=new JSONObject().put("content",content).put("encoding",encoding);return e.put("sha256",hash(bytes(e)));}
- static JSONObject entries(JSONObject p)throws Exception{JSONObject out=new JSONObject(),f=p.getJSONObject("files"),b=p.optJSONObject("binaryFiles");for(Iterator<String>i=f.keys();i.hasNext();){String n=i.next();out.put(n,entry(f.getString(n),"utf8"));}if(b!=null)for(Iterator<String>i=b.keys();i.hasNext();){String n=i.next();if(out.has(n))throw new Exception("文件路径重复");out.put(n,entry(b.getString(n),"base64"));}validate(out);return out;}
- static void validate(JSONObject entries)throws Exception{if(entries.length()>300)throw new Exception("项目超过300个文件");long size=0;for(Iterator<String>i=entries.keys();i.hasNext();){String n=i.next();if(!path(n)||excluded(n))throw new Exception("同步不包含此路径："+n);JSONObject e=entries.getJSONObject(n);byte[]b=bytes(e);size+=b.length;if(b.length>1048576||size>4194304)throw new Exception("同步上限为单文件1 MB、项目4 MB");if(!hash(b).equals(e.getString("sha256")))throw new Exception("文件校验失败："+n);}}
+ static JSONObject entries(JSONObject p)throws Exception{return entries(p,null);}
+
+ /**
+  * 枚举一个项目的全部文件，返回带哈希的条目集合。
+  *
+  * <p>大文件在项目里存的是「引用名」，这里按需读回实际内容并转成标准条目。
+  * 传 filesDir 就能读到大文件；传 null 则只处理小文件。
+  *
+  * @param p 项目对象
+  * @param filesDir 应用私有目录；null 表示不读大文件
+  */
+ static JSONObject entries(JSONObject p,File filesDir)throws Exception{
+  JSONObject out=new JSONObject(),f=p.getJSONObject("files"),b=p.optJSONObject("binaryFiles");
+  for(Iterator<String>i=f.keys();i.hasNext();){String n=i.next();out.put(n,entry(f.getString(n),"utf8"));}
+  if(b!=null)for(Iterator<String>i=b.keys();i.hasNext();){
+   String n=i.next();
+   if(out.has(n))throw new Exception("文件路径重复");
+   String v=b.getString(n);
+   boolean isRef=v.endsWith(".bin");
+   if(isRef){
+    // 大文件：哈希从 bigHashes 索引取（不需要读盘），
+    // 内容按需从项目大文件目录读。
+    JSONObject hashes=p.optJSONObject("bigHashes");
+    String sha=hashes==null?null:hashes.optString(n,null);
+    if(sha==null||sha.isEmpty()){
+     // 索引里没有（旧数据），只能读盘算
+     if(filesDir!=null)sha=hash(readBig(filesDir,v));
+     else sha="";
+    }
+    long sz=0;
+    if(filesDir!=null){File g=new File(bigDir(filesDir),v);if(g.isFile())sz=g.length();}
+    out.put(n,new JSONObject().put("ref",v).put("sha256",sha).put("size",sz));
+   }else{
+    out.put(n,entry(v,"base64"));
+   }
+  }
+  validate(out);return out;}
+ static void validate(JSONObject entries)throws Exception{if(entries.length()>3000)throw new Exception("项目有 "+entries.length()+" 个文件，超过 3000 个上限");long size=0;for(Iterator<String>i=entries.keys();i.hasNext();){String n=i.next();if(!path(n)||excluded(n))throw new Exception("同步不包含此路径："+n);JSONObject e=entries.getJSONObject(n);long len=e.optLong("size",-1);if(len<0&&!isRef(e))len=bytes(e).length;if(len>0)size+=len;if(len>100L*1024*1024||size>200L*1024*1024)throw new Exception("同步上限为单文件 100 MB、项目 200 MB");// 大文件（外部引用）的内容在项目大文件目录里，校验交给读取方；这里只检查元数据齐全
+ if(isRef(e)){if(!e.has("sha256"))throw new Exception("大文件缺少哈希："+n);continue;}
+ if(!hash(bytes(e)).equals(e.getString("sha256")))throw new Exception("文件校验失败："+n);}}
  static JSONObject hashes(JSONObject e)throws Exception{JSONObject h=new JSONObject();for(Iterator<String>i=e.keys();i.hasNext();){String n=i.next();h.put(n,e.getJSONObject(n).getString("sha256"));}return h;}
  static String h(JSONObject e,String n){JSONObject v=e.optJSONObject(n);return v==null?"":v.optString("sha256");}
  static JSONObject merge(JSONObject local,JSONObject remote,JSONObject base)throws Exception{
   validate(local);validate(remote);JSONObject result=new JSONObject(local.toString());Set<String>names=new TreeSet<>();for(JSONObject o:new JSONObject[]{local,remote,base})for(Iterator<String>i=o.keys();i.hasNext();)names.add(i.next());ArrayList<String>conflicts=new ArrayList<>();
   for(String n:names){String l=h(local,n),r=h(remote,n),b=base.optString(n,"");if(l.equals(r))continue;if(l.equals(b)){if(remote.has(n))result.put(n,remote.get(n));else result.remove(n);}else if(!r.equals(b))conflicts.add(n);}
-  if(!conflicts.isEmpty())throw new Exception("两边都修改了同一文件，未覆盖本地："+String.join("、",conflicts));validate(result);return result;
+  if(!conflicts.isEmpty())throw new Exception("两边都修改了同一文件，未覆盖本地："+CloudFiles.join(conflicts));validate(result);return result;
  }
- static void assign(JSONObject p,JSONObject entries)throws Exception{JSONObject f=new JSONObject(),b=new JSONObject();for(Iterator<String>i=entries.keys();i.hasNext();){String n=i.next();JSONObject e=entries.getJSONObject(n);(e.getString("encoding").equals("utf8")?f:b).put(n,e.getString("content"));}p.put("files",f).put("binaryFiles",b);}
+ /**
+  * 把条目集合写回项目对象。超过阈值的文件写成独立文件，JSON 里只留引用。
+  * @param p 项目对象
+  * @param entries 条目集合
+  * @param filesDir 应用私有目录
+  */
+ static void assign(JSONObject p,JSONObject entries,File filesDir)throws Exception{
+ JSONObject f=new JSONObject(),b=new JSONObject(),h=new JSONObject();
+ for(Iterator<String>i=entries.keys();i.hasNext();){
+  String n=i.next();
+  JSONObject e=entries.getJSONObject(n);
+  if(isRef(e)){
+   // 大文件：项目里只存引用名，哈希另存一份索引。
+   //
+   // 哈希直接读盘算，不依赖条目里带的 sha256 ——
+   // 那条传递链（网页 → 原生 → 合并 → 写回）中间环节多，
+   // 任何一环丢了字段，最终索引就是空的，
+   // 下次同步时 merge 拿不到哈希，就会把大文件误判成「两边都改了」而报冲突。
+   String ref=e.getString(REF_MARK);
+   b.put(n,ref);
+   try{
+    File bigFile=new File(bigDir(filesDir),ref);
+    // 流式算哈希 —— readAllBytes 会把整个文件读进堆里，一个 100 MB 的模型就能让手机内存吃紧。
+    if(bigFile.isFile())h.put(n,hashFile(bigFile));
+   }catch(Exception ignored){}
+   continue;
+  }
+  byte[] raw=bytes(e);
+  if(raw.length>BIG_THRESHOLD){
+   String name=bigName(n);
+   JSONObject stored=writeBig(filesDir,name,raw);
+   b.put(n,stored.getString(REF_MARK));
+   h.put(n,stored.getString("sha256"));
+  }else (e.getString("encoding").equals("utf8")?f:b).put(n,e.getString("content"));
+ }
+ p.put("files",f).put("binaryFiles",b).put("bigHashes",h);}
  static void snapshot(JSONObject p)throws Exception{JSONArray old=p.optJSONArray("snapshots"),out=new JSONArray();if(old!=null)for(int i=Math.max(0,old.length()-1);i<old.length();i++)out.put(old.get(i));out.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",new JSONObject(p.getJSONObject("files").toString())).put("binaryFiles",p.optJSONObject("binaryFiles")==null?new JSONObject():new JSONObject(p.getJSONObject("binaryFiles").toString())));p.put("snapshots",out);}
 }

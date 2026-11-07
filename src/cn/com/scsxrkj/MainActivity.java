@@ -51,20 +51,65 @@ import java.util.zip.*;
  final int BG=Color.rgb(28,28,30),INK=Color.rgb(237,237,240),ACCENT=Color.rgb(255,138,91);
  String appVersion="0.0.0";
  ConnectorCatalog connectors;LocalModels localModels;volatile JSONObject liveEdit;
- @Override public void onCreate(Bundle saved){super.onCreate(saved);instance=this;debug=(getApplicationInfo().flags&ApplicationInfo.FLAG_DEBUGGABLE)!=0;try{appVersion=getPackageManager().getPackageInfo(getPackageName(),0).versionName;}catch(Exception ignored){}vault=new Vault(this);prefs=getSharedPreferences("ui",0);desktop=prefs.getBoolean("desktop",false);zoom=prefs.getInt("zoom",100);loadState();localModels=new LocalModels(this);connectors=new ConnectorCatalog(this);art=new ArtManager(this);
-  getWindow().getDecorView();getWindow().setDecorFitsSystemWindows(false);getWindow().setStatusBarColor(Color.TRANSPARENT);getWindow().setNavigationBarColor(Color.TRANSPARENT);getWindow().setNavigationBarContrastEnforced(false);getWindow().setStatusBarContrastEnforced(false);
-  getWindow().getInsetsController().setSystemBarsAppearance(WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+ @Override public void onCreate(Bundle saved){super.onCreate(saved);
+  // 接收「导入模型配置」的广播。配置内容放在应用私有目录的 pending_profiles.json。
+  try{
+   registerReceiver(new android.content.BroadcastReceiver(){
+    @Override public void onReceive(android.content.Context ctx,Intent i){onImportRequest();}
+   },new android.content.IntentFilter("cn.com.scsxrkj.IMPORT_PROFILES"));
+  }catch(Exception ignored){}
+  instance=this;debug=(getApplicationInfo().flags&ApplicationInfo.FLAG_DEBUGGABLE)!=0;try{appVersion=getPackageManager().getPackageInfo(getPackageName(),0).versionName;}catch(Exception ignored){}vault=new Vault(this);prefs=getSharedPreferences("ui",0);desktop=prefs.getBoolean("desktop",false);zoom=prefs.getInt("zoom",100);loadState();localModels=new LocalModels(this);connectors=new ConnectorCatalog(this);art=new ArtManager(this);
+  // ── 系统栏（状态栏 / 导航栏）初始化 ──
+  // 两条栏都设透明，让内容延伸到全屏。API 21 起就可用，minSdk 24 不必判断。
+  getWindow().getDecorView();
+  getWindow().setStatusBarColor(Color.TRANSPARENT);
+  getWindow().setNavigationBarColor(Color.TRANSPARENT);
+  if(Build.VERSION.SDK_INT>=30){
+   // API 30（Android 11）起改用 WindowInsetsController 体系。
+   // 告诉系统「应用自己处理系统栏区域」，不再自动加内边距。
+   getWindow().setDecorFitsSystemWindows(false);
+   // 关掉导航栏对比蒙层，避免深色页面被额外加一层灰。
+   getWindow().setNavigationBarContrastEnforced(false);
+   getWindow().setStatusBarContrastEnforced(false);
+   // 24 = LIGHT_STATUS_BARS(8) | LIGHT_NAVIGATION_BARS(16)
+   // 含义是「浅色背景 + 深色图标」。
+   WindowInsetsController c=getWindow().getInsetsController();
+   if(c!=null)c.setSystemBarsAppearance(24,24);
+  }else{
+   // API 24~29：用旧的 systemUiVisibility 标志位。
+   // 不加这两个标志，白底界面上的状态栏图标会看不见（白字压白底）。
+   int flags=View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+   if(Build.VERSION.SDK_INT>=23)flags|=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+   if(Build.VERSION.SDK_INT>=26)flags|=View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+   getWindow().getDecorView().setSystemUiVisibility(flags);
+  }
   root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(BG);setContentView(root);
-  root.setOnApplyWindowInsetsListener((v,i)->{Insets s=i.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());Insets k=i.getInsets(WindowInsets.Type.ime());root.setPadding(s.left,s.top,s.right,Math.max(s.bottom,k.bottom));return WindowInsets.CONSUMED;});
+  // 把状态栏 / 导航栏 / 刘海 / 输入法的高度转成内边距。
+  // 不做这一步，页面顶部会被状态栏盖住、底部会被键盘盖住。
+  root.setOnApplyWindowInsetsListener((v,i)->{
+   if(Build.VERSION.SDK_INT>=30){
+    // API 30 起可以按「类型」精确取某一类系统栏的高度。
+    Insets s=i.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());
+    Insets k=i.getInsets(WindowInsets.Type.ime());
+    root.setPadding(s.left,s.top,s.right,Math.max(s.bottom,k.bottom));
+    return WindowInsets.CONSUMED;
+   }
+   // API 24~29：只有整体 insets，没有分类接口。用旧路径取系统窗口内边距。
+   Insets s=i.getSystemWindowInsetLeft()>=0?Insets.of(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom()):Insets.NONE;
+   root.setPadding(s.left,s.top,s.right,s.bottom);
+   return i.consumeSystemWindowInsets();
+  });
   header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);root.addView(header,new LinearLayout.LayoutParams(-1,dp(46)));
   header.addView(button("‹","返回",()->goBack()),new LinearLayout.LayoutParams(dp(46),-1));title=new TextView(this);title.setTextSize(15);title.setTextColor(INK);title.setSingleLine(true);title.setText("StepX Studio");header.addView(title,new LinearLayout.LayoutParams(0,-2,1));aiLinkButton=button("联动","StepX Studio 项目协作",()->{if(aiEnabled())link.panel();});header.addView(aiLinkButton,new LinearLayout.LayoutParams(dp(50),-1));header.addView(button("⋯","更多功能",()->menu()),new LinearLayout.LayoutParams(dp(48),-1));
   linkBar=new LinearLayout(this);linkBar.setPadding(dp(12),0,dp(8),0);linkBar.setGravity(Gravity.CENTER_VERTICAL);linkStatus=new TextView(this);linkStatus.setTextColor(ACCENT);linkStatus.setTextSize(11);linkBar.addView(linkStatus,new LinearLayout.LayoutParams(0,-2,1));linkBar.addView(button("停止","停止自动联动",()->link.stop("用户停止联动")),new LinearLayout.LayoutParams(dp(50),dp(44)));root.addView(linkBar);linkBar.setVisibility(View.GONE);
   progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);root.addView(progress,new LinearLayout.LayoutParams(-1,dp(2)));progress.setVisibility(View.GONE);
   content=new FrameLayout(this);root.addView(content,new LinearLayout.LayoutParams(-1,0,1));
+  // 先建 CloudProjects：Studio WebView 创建时要拿它的大文件桥接来注册原生接口
+  cloud=new CloudProjects(this);
   studio=web(false);desk=web(true);content.addView(studio,new FrameLayout.LayoutParams(-1,-1));content.addView(desk,new FrameLayout.LayoutParams(-1,-1));
   focusExit=button("退出专注","退出专注模式",()->setFocus(false));FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(-2,dp(44),Gravity.TOP|Gravity.RIGHT);content.addView(focusExit,fp);focusExit.setVisibility(View.GONE);
   tabs=new LinearLayout(this);tabs.setPadding(dp(2),dp(2),dp(2),dp(2));tabs.setBackground(glass(false));tabs.setElevation(dp(1));LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(-1,dp(48));tp.setMargins(dp(8),dp(2),dp(8),0);root.addView(tabs,tp);rebuildTabs();
-  cloud=new CloudProjects(this);studioUsage=new StudioUsage(this);link=new AutoLink(this);updater=new AppUpdater(this);new Handler().postDelayed(()->{if(!isDestroyed())updater.automatic();},2000);desk.addJavascriptInterface(new Bridge(),"Neo");desk.loadUrl(LOCAL+"index.html");applyBrowser();if(saved!=null)studio.restoreState(saved);if(studio.getUrl()==null)studio.loadUrl(HOME);show(saved==null?"projects":saved.getString("tab","projects"));
+  studioUsage=new StudioUsage(this);link=new AutoLink(this);updater=new AppUpdater(this);new Handler().postDelayed(()->{if(!isDestroyed())updater.automatic();},2000);desk.addJavascriptInterface(new Bridge(),"Neo");desk.loadUrl(LOCAL+"index.html");applyBrowser();if(saved!=null)studio.restoreState(saved);if(studio.getUrl()==null)studio.loadUrl(HOME);show(saved==null?"projects":saved.getString("tab","projects"));
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(0,()->goBack());
   if(debug&&getIntent().getBooleanExtra("artSelftest",false))worker.execute(()->ArtSelfTest.run(this));
   if(debug&&getIntent().getBooleanExtra("cloudSelftest",false))worker.execute(()->CloudFilesTest.run(this));
@@ -101,7 +146,7 @@ import java.util.zip.*;
   *
   * @param tab 目标 Tab 标识
   */
- void show(String tab){if(tab.equals("ai")&&!aiEnabled())tab="projects";root.setBackgroundColor(BG);getWindow().getInsetsController().setSystemBarsAppearance(0,24);nativeText(false);currentTab=tab;local=!tab.equals("studio");studio.setVisibility(local?View.GONE:View.VISIBLE);desk.setVisibility(local?View.VISIBLE:View.GONE);title.setText("StepX Studio");progress.setVisibility(View.GONE);updateNavigation();if(!local)syncPageColor();if(local)desk.evaluateJavascript("window.navigate&&navigate("+JSONObject.quote(tab)+")",null);}
+ void show(String tab){if(tab.equals("ai")&&!aiEnabled())tab="projects";root.setBackgroundColor(BG);setLightBars(false);nativeText(false);currentTab=tab;local=!tab.equals("studio");studio.setVisibility(local?View.GONE:View.VISIBLE);desk.setVisibility(local?View.VISIBLE:View.GONE);title.setText("StepX Studio");progress.setVisibility(View.GONE);updateNavigation();if(!local)syncPageColor();if(local)desk.evaluateJavascript("window.navigate&&navigate("+JSONObject.quote(tab)+")",null);}
  /**
   * 把内部页面标识翻译成标题栏上的中文名字。
   *
@@ -146,7 +191,60 @@ import java.util.zip.*;
   *   <li>都不行 → 回首页，再不行就询问是否退出</li>
   * </ol>
   */
- void goBack(){WindowInsets insets=root.getRootWindowInsets();if(insets!=null&&insets.isVisible(WindowInsets.Type.ime())){getWindow().getInsetsController().hide(WindowInsets.Type.ime());return;}if(focus){setFocus(false);return;}if(!local&&studio.canGoBack()){studio.goBack();return;}if(local){desk.evaluateJavascript("window.backLocal?backLocal():false",r->{if(!"true".equals(r))exitOrHome();});}else exitOrHome();}
+ /**
+  * 切换状态栏 / 导航栏的图标颜色。
+  *
+  * <p>浅色背景要配深色图标，否则白色图标压在白色背景上什么都看不见；
+  * 深色背景（如全屏预览）要配浅色图标。
+  *
+  * @param light 传 true 表示「背景浅、图标深」
+  */
+ void setLightBars(boolean light){
+  if(Build.VERSION.SDK_INT>=30){
+   WindowInsetsController c=getWindow().getInsetsController();
+   if(c!=null)c.setSystemBarsAppearance(light?24:0,24);
+  }else{
+   int flags=getWindow().getDecorView().getSystemUiVisibility();
+   if(light){
+    flags|=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+    if(Build.VERSION.SDK_INT>=26)flags|=View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+   }else{
+    flags&=~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+    flags&=~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+   }
+   getWindow().getDecorView().setSystemUiVisibility(flags);
+  }
+ }
+
+ /**
+  * 如果输入法正在显示，就收起它。
+  *
+  * @return 收了返回 true（调用方应直接结束处理，不要再退出页面）
+  */
+ boolean hideIme(){
+  if(Build.VERSION.SDK_INT>=30){
+   WindowInsets i=root.getRootWindowInsets();
+   if(i==null||!i.isVisible(WindowInsets.Type.ime()))return false;
+   WindowInsetsController c=getWindow().getInsetsController();
+   if(c==null)return false;
+   c.hide(WindowInsets.Type.ime());
+   return true;
+  }
+  // API 24~29 没有查询输入法显示状态的接口，只能按「输入焦点」推断：
+  // 有控件持有焦点且是文本输入类，就认为键盘可能弹着，先收一次。
+  android.view.View f=getCurrentFocus();
+  if(f instanceof android.widget.EditText){
+   android.view.inputmethod.InputMethodManager m=(android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+   if(m!=null)m.hideSoftInputFromWindow(f.getWindowToken(),0);
+   f.clearFocus();
+   return true;
+  }
+  return false;
+ }
+
+ void goBack(){
+  // 键盘弹着时，返回键先收键盘，不要直接退出页面。
+  if(hideIme())return;if(focus){setFocus(false);return;}if(!local&&studio.canGoBack()){studio.goBack();return;}if(local){desk.evaluateJavascript("window.backLocal?backLocal():false",r->{if(!"true".equals(r))exitOrHome();});}else exitOrHome();}
  /** 返回键的最后一站：不在首页就先回首页，在首页就弹窗确认退出。 */
  void exitOrHome(){if(!currentTab.equals("projects")){show("projects");return;}new AlertDialog.Builder(this).setMessage("退出 StepX Studio？项目草稿已自动保存。").setPositiveButton("退出",(d,w)->finish()).setNegativeButton("继续",null).show();}
 
@@ -162,7 +260,13 @@ import java.util.zip.*;
   *   <li>官方网页：允许跳转站内、允许弹窗、允许下载</li>
   * </ul>
   */
- WebView web(boolean trusted){WebView w=new WebView(this);w.setBackgroundColor(BG);WebSettings s=w.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(!trusted);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setMediaPlaybackRequiresUserGesture(true);s.setSupportMultipleWindows(!trusted);s.setJavaScriptCanOpenWindowsAutomatically(false);s.setBuiltInZoomControls(!trusted);s.setDisplayZoomControls(false);s.setUseWideViewPort(true);s.setLoadWithOverviewMode(!trusted);WebView.setWebContentsDebuggingEnabled(debug);CookieManager.getInstance().setAcceptThirdPartyCookies(w,false);
+ WebView web(boolean trusted){WebView w=new WebView(this);
+  // Studio 是远程网页（trusted=false），必须在加载页面前注册原生桥接 ——
+  // addJavascriptInterface 只对「注册之后加载的页面」生效，
+  // 运行时再调用的话，已加载的页面里根本没有这个对象。
+  // 云端同步的大文件通道就靠它。
+  if(!trusted&&cloud!=null)w.addJavascriptInterface(cloud.nativeBridge,"NeoCloudRaw");
+  w.setBackgroundColor(BG);WebSettings s=w.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(!trusted);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setMediaPlaybackRequiresUserGesture(true);s.setSupportMultipleWindows(!trusted);s.setJavaScriptCanOpenWindowsAutomatically(false);s.setBuiltInZoomControls(!trusted);s.setDisplayZoomControls(false);s.setUseWideViewPort(true);s.setLoadWithOverviewMode(!trusted);WebView.setWebContentsDebuggingEnabled(debug);CookieManager.getInstance().setAcceptThirdPartyCookies(w,false);
   // 本地界面不走网络缓存：每次都从 APK 里读最新文件，避免升级后还跑旧脚本
   if(trusted)s.setCacheMode(WebSettings.LOAD_NO_CACHE);
   w.setWebViewClient(new WebViewClient(){
@@ -234,7 +338,8 @@ import java.util.zip.*;
     "关于与使用说明",                               // 15 打开帮助页，看功能说明和免责声明
     "检查更新",                                     // 16 查 GitHub 上有没有新版本
     aiEnabled()?"关闭 AI 助手":"开启 AI 助手",       // 17 AI 助手总开关：关掉后 AI Tab 消失、AI 相关功能不可达
-    "同步云端项目到本地"                            // 18 从官方 Studio 云端拉取项目列表，可下载到本地
+    "同步云端项目到本地",                            // 18 从官方 Studio 云端拉取项目列表，可下载到本地
+    "云端大文件通道自检"                            // 19 诊断用：在设备上造一个大文件走完整通道，验证能不能搬运百 MB 级文件
   };
 
   new AlertDialog.Builder(this).setTitle("StepX Studio "+appVersion).setItems(items,(d,n)->{
@@ -268,6 +373,7 @@ import java.util.zip.*;
       case 16: updater.show();break;
       case 17: try{setAiEnabled(!aiEnabled());}catch(Exception e){toast(safeError(e));}break;
       case 18: cloud.list();break;
+      case 19: chooseSelfTestSize();break;
     }
   }).show();
 }
@@ -417,6 +523,94 @@ import java.util.zip.*;
    try{synchronized(MainActivity.this){if(active!=null||link.running||IntegrationActivity.busy)throw new Exception("AI 任务正在运行，请结束后重试");JSONObject next=new JSONObject(state.toString());JSONArray removed=ChatHistory.remove(next,ids);JSONObject old=state;state=next;try{saveState();}catch(Exception e){state=old;throw e;}event("chatsDeleted",removed);}}catch(Exception e){event("error",safeError(e));}
   }).show();
  }
+ /**
+  * 让用户选自检文件的大小，然后跑一次大文件通道自检。
+  *
+  * <p>诊断用：造一个指定大小的假文件，走完整的
+  * 「分块写入 → 落盘 → 分块读回 → 校验」流程。
+  */
+ void chooseSelfTestSize(){
+  final String[] sizes={"20 MB","50 MB","83 MB","100 MB"};
+  final int[] values={20,50,83,100};
+  // 不用 setItems —— 它和 setMessage 一起用时列表会被吃掉，
+  // 改成自建一个 LinearLayout 当作对话框内容。
+  LinearLayout box=new LinearLayout(this);
+  box.setOrientation(LinearLayout.VERTICAL);
+  int pad=dp(20);
+  box.setPadding(pad,pad,pad,pad);
+  android.widget.TextView tip=new android.widget.TextView(this);
+  tip.setText("在设备上生成一个指定大小的随机文件，走完整的写入与读回通道，验证能不能搬运百 MB 级文件。不上传任何数据到云端。");
+  tip.setTextSize(14);
+  tip.setPadding(0,0,0,dp(12));
+  box.addView(tip);
+  for(int i=0;i<sizes.length;i++){
+   final int n=i;
+   Button b=new Button(this);
+   b.setText(sizes[i]);
+   b.setOnClickListener(v->{
+    try{
+     prefs.edit().putInt("cloudSelfTestMb",values[n]).apply();
+     cloudSelfTest(new JSONObject().put("mb",values[n]));
+    }catch(Exception e){toast("自检无法启动："+e.getMessage());}
+   });
+   box.addView(b);
+  }
+  new AlertDialog.Builder(this)
+   .setTitle("云端大文件通道自检")
+   .setView(box)
+   .setNegativeButton("取消",null).show();
+ }
+
+ /**
+  * 大文件通道自检。
+  *
+  * <p>目的：在真机上验证「JS → 原生 → 落盘 → 原生 → JS」这条通道
+  * 能正确搬运大文件，而不必真的往云端传 83 MB。
+  *
+  * <p>流程：造一个 N MB 的随机数据 → 按 1 MB 分块写入暂存区 →
+  * 关闭句柄 → 分块读回 → 比对 SHA-256。
+  *
+  * @param p 参数：{@code {"mb": 20, "path": "test/big.bin"}}
+  */
+ void cloudSelfTest(JSONObject p){
+  try{
+   int mb=p.optInt("mb",10);
+   if(mb<1||mb>100)mb=10;
+   // 允许通过诊断参数覆盖默认大小
+   int override=prefs.getInt("cloudSelfTestMb",0);
+   if(override>=1&&override<=100)mb=override;
+   String path=p.optString("path","test/big.bin");
+   if(!CloudFiles.path(path))throw new Exception("测试路径非法");
+   String pid=p.optString("projectId","p_selftest");
+   long t0=System.currentTimeMillis();
+
+   byte[] data=new byte[mb*1024*1024];
+   new java.util.Random(12345).nextBytes(data);
+   String expect=CloudFiles.hash(data);
+
+   CloudStaging st=new CloudStaging(getFilesDir());
+   CloudStaging.Writer w=st.begin(pid,path);
+   int CH=1024*1024;
+   for(int off=0;off<data.length;off+=CH){
+    int len=Math.min(CH,data.length-off);
+    byte[] part=new byte[len];
+    System.arraycopy(data,off,part,0,len);
+    w.append(android.util.Base64.encodeToString(part,android.util.Base64.NO_WRAP));
+   }
+   w.close();
+
+   long size=st.size(pid,path);
+   boolean ok=st.verify(pid,path,expect);
+   long ms=System.currentTimeMillis()-t0;
+   String msg=(ok?"SELFTEST OK":"SELFTEST FAIL")+" mb="+mb+" size="+size+" ms="+ms+" sha="+expect.substring(0,16);
+   android.util.Log.i("NeoCloudSelfTest",msg);
+   toast((ok?"自检通过":"自检失败")+"："+mb+" MB，"+ms+" ms");
+  }catch(Exception e){
+   android.util.Log.e("NeoCloudSelfTest","SELFTEST ERROR "+e.getMessage(),e);
+   toast("自检失败："+e.getMessage());
+  }
+ }
+
  /**
   * 本地界面与原生之间的桥接，挂在页面的 {@code window.Neo} 上。
   *
@@ -722,7 +916,105 @@ if(info==null||info.packageName==null||!info.packageName.equals(b.getString("pac
  /** 横竖屏切换或内存回收前保存网页浏览位置和当前 Tab。 */
  @Override public void onSaveInstanceState(Bundle b){super.onSaveInstanceState(b);studio.saveState(b);b.putString("tab",currentTab);}
  /** 回到前台：恢复背屏服务、重新读一遍本地数据同步给页面、恢复屏幕常亮设置。 */
- @Override public void onResume(){super.onResume();MatrixDevice.recover(this);if(updater!=null)updater.foreground=true;if(studio!=null)studio.onResume();if(desk!=null&&active==null&&(art==null||!art.busy)&&!IntegrationActivity.busy){loadState();sendState();}awake(prefs!=null&&prefs.getBoolean("awake",false));}
+ /**
+  * 处理外部传入的配置导入请求。
+  *
+  * <p>通过 Intent 传入一段 JSON，格式和界面上的「粘贴导入配置」一样：
+  * <pre>[{"name":"...","endpoint":"https://...","model":"...","key":"..."}]</pre>
+  *
+  * <p>安全约束：地址必须 https；协议只允许 compatible / anthropic。
+  * 密钥走和界面完全相同的加密存储路径（{@link Vault}）。
+  *
+  * @param json 要导入的配置 JSON
+  * @return 成功导入的条数
+  */
+ int importProfilesJson(String json)throws Exception{
+  JSONArray list=new JSONArray(json);
+  int ok=0;
+  for(int i=0;i<list.length();i++){
+   JSONObject src=list.getJSONObject(i);
+   String name=src.optString("name","").trim();
+   String endpoint=src.optString("endpoint","").trim();
+   String model=src.optString("model","").trim();
+   String key=src.optString("key","").trim();
+   String protocol="anthropic".equals(src.optString("protocol"))?"anthropic":"compatible";
+   if(name.isEmpty()||endpoint.isEmpty()||model.isEmpty()||key.isEmpty())continue;
+   if(!endpoint.toLowerCase().startsWith("https://"))continue;
+   String id="imp-"+UUID.randomUUID().toString().substring(0,8);
+   JSONObject profile=new JSONObject().put("id",id).put("name",name).put("endpoint",endpoint)
+    .put("model",model).put("protocol",protocol).put("maxTokens",src.optInt("maxTokens",4096))
+    .put("streaming",src.optBoolean("streaming",true)).put("system",src.optString("system",""));
+   vault.put(id,key);
+   upsert("profiles",profile);
+   ok++;
+  }
+  sendState();
+  event("profilesImported",ok);
+  return ok;
+ }
+
+ /**
+  * 从应用私有目录读取待导入的配置。
+  *
+  * <p>为什么需要这个：命令行传配置有各种坑 ——
+  * JSON 里的引号会被 shell 吃掉，Base64 尾部的 = 会被当成参数分隔符而截断，
+  * 而 /data/local/tmp 对普通应用还有 SELinux 限制。
+  * 写进应用自己的私有目录最稳。
+  *
+  * <p>文件路径固定：{@code filesDir/pending_profiles.json}。
+  *
+  * @return 成功导入的条数；没有待导入文件时返回 0
+  */
+ int importPendingFile(){
+  File f=new File(getFilesDir(),"pending_profiles.json");
+  if(!f.isFile()||f.length()==0||f.length()>512*1024)return 0;
+  try{
+   String json=new String(readLimited(new FileInputStream(f),512*1024),StandardCharsets.UTF_8);
+   f.delete();
+   return importProfilesJson(json);
+  }catch(Exception e){toast("读取待导入配置失败："+safeError(e));return 0;}
+ }
+
+ /** 检查 Intent 里有没有待导入的配置。 */
+ void handleIntent(Intent in){
+  if(in==null)return;
+  String json=in.getStringExtra("profiles_json");
+  // Base64 形式：命令行传 JSON 会被 shell 的引号规则搞坏，Base64 只有安全字符
+  if(json==null||json.trim().isEmpty()){
+   String b64=in.getStringExtra("profiles_json_b64");
+   if(b64==null||b64.trim().isEmpty()){
+    // 文件形式：命令行传超长字符串还可能被截断，指向文件最可靠
+    String path=in.getStringExtra("profiles_json_file");
+    if(path==null||path.trim().isEmpty())return;
+    try{
+     java.io.File f=new java.io.File(path);
+     if(!f.isFile()||f.length()>512*1024)throw new Exception("文件不存在或过大");
+     byte[] b=new byte[(int)f.length()];
+     try(java.io.FileInputStream in2=new java.io.FileInputStream(f)){int o=0,r;while(o<b.length&&(r=in2.read(b,o,b.length-o))>0)o+=r;}
+     json=new String(b,java.nio.charset.StandardCharsets.UTF_8);
+    }catch(Exception e){toast("读取配置文件失败："+safeError(e));return;}
+   }else{
+    try{json=new String(android.util.Base64.decode(b64,android.util.Base64.DEFAULT),"UTF-8");}
+    catch(Exception e){toast("配置数据解码失败");return;}
+   }
+  }
+  if(json==null||json.trim().isEmpty())return;
+  try{
+   int n=importProfilesJson(json);
+   toast(n>0?("已导入 "+n+" 套模型配置"):"没有可导入的配置");
+  }catch(Exception e){toast("配置导入失败："+safeError(e));}
+  in.removeExtra("profiles_json");
+ }
+
+ @Override public void onNewIntent(Intent in){super.onNewIntent(in);setIntent(in);handleIntent(in);}
+
+ /** 收到导入请求的广播时，从私有目录读配置。 */
+ void onImportRequest(){
+  int n=importPendingFile();
+  if(n>0)toast("已导入 "+n+" 套模型配置");
+ }
+
+ @Override public void onResume(){super.onResume();handleIntent(getIntent());MatrixDevice.recover(this);if(updater!=null)updater.foreground=true;if(studio!=null)studio.onResume();if(desk!=null&&active==null&&(art==null||!art.busy)&&!IntegrationActivity.busy){loadState();sendState();}awake(prefs!=null&&prefs.getBoolean("awake",false));}
  /** 退到后台：停止自动联动、暂停网页、把 Cookie 刷到磁盘。 */
  @Override public void onPause(){if(updater!=null)updater.foreground=false;if(link!=null&&link.running)link.stop("应用进入后台，已停止后续自动步骤");if(studio!=null)studio.onPause();CookieManager.getInstance().flush();super.onPause();}
  /** 销毁：关掉所有对话框、取消进行中的请求、断开 JS 桥、释放 WebView。 */

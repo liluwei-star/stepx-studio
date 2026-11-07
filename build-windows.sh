@@ -114,7 +114,7 @@ echo "      class 文件：$(find out/classes -name '*.class' | wc -l)"
 echo "[4/6] D8 转 dex"
 find out/classes -name '*.class' -print0 | xargs -0 \
   "$JAVA_HOME/bin/java" -cp vendor/tools/r8-9.5.26.jar com.android.tools.r8.D8 \
-  --min-api 30 --lib "$SDKW/platforms/android-36/android.jar" \
+  --min-api 24 --lib "$SDKW/platforms/android-36/android.jar" \
   --output out/dex vendor/apksig-android-4.4.0.jar vendor/local-ai/*.jar
 
 # --- 5. 打包 ----------------------------------------------------------------

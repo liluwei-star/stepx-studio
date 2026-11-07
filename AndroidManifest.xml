@@ -1,5 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="cn.com.scsxrkj" android:versionCode="9" android:versionName="0.2.5">
-<uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36"/>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="cn.com.scsxrkj" android:versionCode="11" android:versionName="0.3.1">
+<uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36"/>
 <uses-permission android:name="android.permission.INTERNET"/>
 <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -13,6 +13,9 @@
 <uses-native-library android:name="libvndksupport.so" android:required="false"/>
 <activity android:name=".MainActivity" android:exported="true" android:resizeableActivity="true" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density" android:windowSoftInputMode="adjustResize">
 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+<!-- 接收外部传入的模型配置导入请求：action 为 cn.com.scsxrkj.IMPORT_PROFILES，
+     配置 JSON 放在 extra「profiles_json」里 -->
+<intent-filter><action android:name="cn.com.scsxrkj.IMPORT_PROFILES"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
 </activity><activity android:name=".IntegrationActivity" android:exported="true"/>
 <provider android:name=".BuildProvider" android:authorities="cn.com.scsxrkj.builds" android:exported="false" android:grantUriPermissions="true"/>
 </application></manifest>
