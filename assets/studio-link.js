@@ -1,3 +1,14 @@
+/*
+ * studio-link.js —— 从官方 Studio 页面提取结构化信息
+ * ================================================================
+ *
+ * 只读「公开渲染出来的 DOM」：页面上一眼能看到的东西。
+ * 不碰 Cookie、不读框架内部状态、不调私有接口。
+ *
+ * 用途：把官方页面上的项目内容整理成文字，供本地 AI 当上下文用。
+ * 原有英文注释：Public, rendered Studio DOM only.
+ * ================================================================
+ */
 // Public, rendered Studio DOM only. No cookies, framework state or private API.
 function studioLink(op) {
  const normalize=s=>s.replace(/\r/g,'').replace(/\n{2,}/g,'\n\n').trim();

@@ -1,3 +1,15 @@
+/*
+ * chat-history.js —— AI 对话历史管理
+ * ================================================================
+ *
+ * 负责对话列表的展示、搜索、多选和批量删除。
+ *
+ * 要点：
+ *   · 删除对话只删对话本身，项目文件和 Token 账本都保留
+ *     （否则历史用量会凭空少掉，费用对不上账）
+ *   · 批量删除前一定弹确认框，且 AI 任务运行中不允许删
+ * ================================================================
+ */
 'use strict';
 let historyEditing=false,historyQuery='',historySelected=new Set();
 function historyRows(){const q=historyQuery.trim().toLocaleLowerCase();return S.chats.filter(c=>!q||[c.name,S.projects.find(p=>p.id===c.projectId)?.name].some(v=>String(v||'').toLocaleLowerCase().includes(q))).slice().sort((a,b)=>(b.updated||b.created||0)-(a.updated||a.created||0));}

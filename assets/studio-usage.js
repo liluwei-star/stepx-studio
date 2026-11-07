@@ -1,3 +1,16 @@
+/*
+ * studio-usage.js —— 读取官方 Studio 历史里的用量数据
+ * ================================================================
+ *
+ * 只读适配器：按官方项目历史数据的结构，把用量数字读出来。
+ *
+ * 三条红线（原注释已声明，这里展开说明）：
+ *   · 不访问 Cookie
+ *   · 不读取登录凭据
+ *   · 不读取对话正文
+ *   · 不向其他域名发请求
+ * ================================================================
+ */
 // Read-only adapter for the observed official project-history schema (2026-10-18).
 // Never accesses cookies, credentials, conversation text or an API on another origin.
 async function neoInspectStudioUsage(){

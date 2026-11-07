@@ -1,4 +1,29 @@
 #!/bin/bash
+# =============================================================================
+# 构建 StepX Studio 工作台本体（macOS / Linux 版）
+# -----------------------------------------------------------------------------
+# 这是仓库自带的标准构建脚本，适用于 macOS 和 Linux。
+# 在 Windows 上请改用 build-windows.sh —— 原因见那个文件的注释头
+# （原生程序不认 MSYS 路径、class 版本不匹配、通配符不展开）。
+#
+# 流程：
+#   1. 编译资源（aapt2 compile）
+#   2. 编译 Java（javac，-source 17）
+#   3. 转 dex（D8）
+#   4. 链接资源与清单（aapt2 link）
+#   5. 打包并用 apksigner 签名
+#
+# 需要的环境变量：
+#   ANDROID_SDK_ROOT  Android SDK 路径
+#   JAVA_HOME         JDK 路径（需要 17 及以上）
+#
+# 版本号来源：直接读 AndroidManifest.xml 里的 versionName / versionCode，
+#             不在这里硬编码，避免出现「改了清单但包里还是旧版本」的问题。
+#
+# 用法：
+#   ./build.sh           构建 debug 版
+#   ./build.sh release   构建 release 版
+# =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
 SDK="${ANDROID_SDK_ROOT:?Set ANDROID_SDK_ROOT}"

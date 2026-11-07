@@ -1,3 +1,13 @@
+/*
+ * live-edit.js —— AI 实时生成时的进度指示
+ * ================================================================
+ *
+ * AI 一边生成一边往回调进度，这里负责在项目卡片上显示一个跳动的圆点，
+ * 并显示当前阶段（准备生成 / 正在生成 / 检索 GitHub 参考 / 载入本地模型）。
+ *
+ * 只做视觉提示，不参与任何数据处理。
+ * ================================================================
+ */
 'use strict';
 let aiLive={};
 function projectLiveDot(id){const active=aiLive.active&&aiLive.editing&&aiLive.projectId===id;return `<span class="project-live-dot" data-live-id="${esc(id)}" ${active?'':'hidden'} role="status" aria-label="AI 正在修改此项目" title="AI 正在修改此项目"></span>`}

@@ -1,1 +1,9 @@
+<!--
+  local-runner.html —— 项目本地预览的容器页
+  ================================================================
+  只是一个空的 iframe 宿主。真正的项目代码由 LocalRunner 编译后
+  注入进来，并在一个没有任何 JS 桥的隔离 WebView 里运行，
+  所以预览别人的代码也拿不到本应用的任何权限。
+  ================================================================
+-->
 <!doctype html><meta charset="utf-8"><script src="local-vendor/esbuild.js"></script><script src="local-vendor/compiler-tools.js"></script><script src="local-runner.js"></script>

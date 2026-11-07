@@ -1,3 +1,25 @@
+/*
+ * art.js —— 美术资源（AI 生图）页
+ * ================================================================
+ *
+ * 让用户在项目里直接生成插图、图标、背景图，生成结果自动存进项目的
+ * artAssets 里，可以在页面里用相对路径引用。
+ *
+ * 关键设计：
+ *   · 绘图服务的地址和密钥只存在工作台配置里，不进项目
+ *   · 生成的图片连同「用的哪个服务、什么提示词」一起存进项目，便于追溯
+ *   · 导出项目、上传云端时不会把密钥带出去
+ *
+ * 相关动作（由 Neo.action 转发给原生 ArtManager）：
+ *   artProfile   保存绘图配置
+ *   artSettings  打开绘图 API 设置
+ *   artModels    检测该服务支持哪些绘图模型
+ *   artGenerate  开始生成图片
+ *   artResume    继续上次中断的生成
+ *   artCancel    取消生成
+ *   artDelete    删除一条配置
+ * ================================================================
+ */
 'use strict';
 let artEdit=null,artStatus='',artBusy=!!S.artBusy;
 const artProfiles=()=>S.artProfiles||[],artProfile=()=>artProfiles().find(x=>x.id===S.artProfileId);

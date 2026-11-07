@@ -1,3 +1,14 @@
+/*
+ * connectors.js —— 官方连接器目录浏览
+ * ================================================================
+ *
+ * 展示官方 Studio 的 39 个连接器、358 项能力，供用户挑选。
+ *
+ * 重要边界：这里看到的只是「这个连接器能干什么」的公开说明文字。
+ * 既不会导入账号授权，也不会获得执行权限——真要用还是得去官方
+ * Studio 里自己授权。
+ * ================================================================
+ */
 'use strict';
 let connectorQuery='',connectorCategory='',connectorId='',connectorStatus='';
 function connectorRows(){return S.connectors?.items||[]}

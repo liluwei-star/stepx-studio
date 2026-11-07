@@ -1,1 +1,27 @@
+<!--
+  index.html —— 本地工作台的外壳页面
+  ================================================================
+  这个文件几乎是空的，只做三件事：
+    1. 声明 viewport、主题色，防止手机上缩放错乱
+    2. 放一个 <div id="app"> 容器
+    3. 按顺序加载下面这一堆脚本
+
+  脚本分工（按加载顺序）：
+    model-limits.js     模型上下文长度限制
+    chat-history.js     对话历史管理
+    bottom-jump.js      「跳到最新消息」按钮
+    connectors.js       官方连接器目录
+    local-models.js     本地离线模型管理
+    live-edit.js        AI 实时生成进度
+    art.js              美术资源（AI 生图）
+    usage.js            Token 用量账本
+    projects.js         本地项目列表
+    collab.js           项目协作页
+    app.js              主界面与全部交互逻辑（最大的一块）
+
+  页面本身不做任何事，全部逻辑在这些脚本里。
+  原生通过 window.receive(type, data) 推事件进来，
+  页面通过 window.Neo.action(type, json) 调原生功能。
+  ================================================================
+-->
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://neo.local/licenses-apksig.txt; frame-src 'none'; base-uri 'none'; form-action 'none'"><title>StepX Studio 本机工作台</title><link rel="stylesheet" href="style.css"></head><body><main id="app"></main><div id="notice" role="status" aria-live="polite"></div><script src="usage.js"></script><script src="projects.js"></script><script src="model-limits.js"></script><script src="chat-history.js"></script><script src="bottom-jump.js"></script><script src="local-models.js"></script><script src="live-edit.js"></script><script src="connectors.js"></script><script src="app.js"></script><script src="collab.js"></script><script src="art.js"></script></body></html>

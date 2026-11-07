@@ -1,3 +1,16 @@
+/*
+ * studio-usage-scan.cjs —— 用量扫描脚本
+ * ================================================================
+ *
+ * 在官方 Studio 页面里执行的一段扫描程序，负责从页面返回的数据里
+ * 提取 Token 用量。
+ *
+ * 只读不写：不修改页面、不碰 Cookie 和登录凭据、不向其他域名发请求。
+ *
+ * 之所以单独放成 .cjs：原生侧需要把这段代码原样注入网页执行，
+ * 放在独立文件里便于校验和更新，也方便版本比对。
+ * ================================================================
+ */
 // StepX Studio usage scanner v1: read only this sandbox's observed SDK project logs.
 // No credentials, environment, network, user content, writes or subprocesses.
 const fs = require('fs'), path = require('path');

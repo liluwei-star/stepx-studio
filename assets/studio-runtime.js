@@ -1,3 +1,15 @@
+/*
+ * studio-runtime.js —— 官方 Studio 页面里的用量统计运行时
+ * ================================================================
+ *
+ * 匹配并解析官方页面会执行的一段固定扫描指令，从返回结果里取出
+ * Token 用量数据。
+ *
+ * 只做格式匹配和数字读取，不修改官方页面的任何行为。
+ * 原有英文注释：Ignore formatting changes only; require the complete
+ * fixed scanner in a single heredoc.
+ * ================================================================
+ */
 // Ignore formatting changes only; require the complete fixed scanner in a single heredoc.
 function neoRuntimeCommandMatches(command,code){
  const m=command.trim().match(/^node\s+<<'NEO_USAGE_SCAN'\r?\n([\s\S]+)\r?\nNEO_USAGE_SCAN$/);if(!m)return false;
