@@ -1,6 +1,11 @@
 package cn.com.scsxrkj;
 import org.json.*;
-/** A relay opens only the destination whose complete uploaded snapshot was verified. */
+/**
+ * 「云端接力开发」的状态机。
+ *
+ * <p>规则很硬：只有当某个上传快照完整校验通过之后，才允许打开对应的云端项目。
+ * 这样可以杜绝「以为传完了、其实传了一半」导致的数据丢失。
+ */
 final class CloudRelay {
  final String localId;final JSONObject hashes;String destinationId;
  CloudRelay(JSONObject project)throws Exception{localId=project.getString("id");hashes=CloudFiles.hashes(CloudFiles.entries(project));JSONObject cloud=project.optJSONObject("cloud");destinationId=cloud==null?"":cloud.optString("id");if(hashes.length()==0)throw new Exception("项目没有可接力的文件");}

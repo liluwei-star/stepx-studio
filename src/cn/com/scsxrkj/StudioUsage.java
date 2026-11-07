@@ -4,6 +4,12 @@ import android.app.AlertDialog;
 import java.util.UUID;
 import org.json.*;
 import java.nio.charset.StandardCharsets;
+/**
+ * 统计官方 Studio 网页版消耗的 Token。
+ *
+ * <p>网页版的用量不像 API 那样能手算，只能通过请求官方的用量接口来取。
+ * <b>不做任何篡改或注入</b>，只是读官方自己返回的数字。
+ */
 final class StudioUsage {
  final MainActivity a;boolean running;int generation;StudioUsage(MainActivity activity){a=activity;JSONObject old=a.state.optJSONObject("studioUsageCheck");if(old!=null&&"running".equals(old.optString("status")))try{old.put("status","interrupted").put("message","应用已重启，未重复发送诊断；请先核对 Studio 任务。旧报告保留。");}catch(Exception ignored){}}
  void requestRuntime(){

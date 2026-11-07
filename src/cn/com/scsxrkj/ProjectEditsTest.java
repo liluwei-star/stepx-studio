@@ -1,6 +1,7 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.io.*;
+/** 项目编辑模块的自检。只在调试版触发，不动用户的真实项目。 */
 final class ProjectEditsTest {
  static JSONArray checks;interface Attempt{void run()throws Exception;}
  static void ok(boolean x,String n)throws Exception{if(!x)throw new Exception(n);checks.put(n);}

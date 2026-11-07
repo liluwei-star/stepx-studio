@@ -1,6 +1,6 @@
 package cn.com.scsxrkj;
 import org.json.*;
-/** Headless Android-runtime checks; no activity, account or network is accessed. */
+/** 云端接力模块的无头测试。不启动界面、不登录账号、不访问网络。 */
 public final class CloudRelayTest {
  interface Work{void run()throws Exception;}
  static void reject(Work w)throws Exception{try{w.run();}catch(Exception expected){return;}throw new Exception("Expected rejection");}

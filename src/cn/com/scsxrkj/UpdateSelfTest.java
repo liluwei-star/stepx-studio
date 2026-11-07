@@ -1,7 +1,7 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.io.*;
-/** Invoked only by an explicit debug-build intent. Does not touch user projects or keys. */
+/** 更新模块的自检。只在调试版通过显式 Intent 触发，不碰用户项目和密钥。 */
 final class UpdateSelfTest {
  interface Attempt{void run()throws Exception;}
  static JSONArray checks;

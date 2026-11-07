@@ -3,6 +3,9 @@ import org.json.*;
 import java.io.*;
 import java.util.*;
 import android.graphics.*;
+/**
+ * 绘图模块的自检。只在调试版通过显式 Intent 触发，不碰用户的项目和密钥。
+ */
 final class ArtSelfTest {
  interface Work{void run()throws Exception;}
  static void rejected(Work w)throws Exception{try{w.run();}catch(Exception expected){return;}throw new Exception("Expected rejection");}

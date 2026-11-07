@@ -7,7 +7,19 @@ import org.json.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Bounded foreground relay over the public Studio composer, never a private API. */
+/**
+ * 自动联动：让 AI 连续自动执行多步任务。
+ *
+ * <p>做法是在官方 Studio 的公开输入框里反复填写、发送、等待、读取结果，
+ * 形成一条自动化流水线。<b>不走任何私有 API</b>，用的就是普通用户点鼠标能做的那套操作。
+ *
+ * <p>带三重保护：
+ * <ul>
+ *   <li>有总时长上限（deadline），跑太久自动停</li>
+ *   <li>检测页面是否稳定（连续几次读到的内容不变才算完成）</li>
+ *   <li>用户随时可以点「停止」，应用退到后台时也会自动停止</li>
+ * </ul>
+ */
 final class AutoLink {
  final MainActivity a;final Handler timer;JSONObject run;String projectId="",expectedChat="",script="";boolean running;long deadline;int stable,domRetries;String previousSummary="";
  AutoLink(MainActivity activity){a=activity;timer=new Handler(a.getMainLooper());try{script=new String(MainActivity.readLimited(a.getAssets().open("studio-link.js"),64000),StandardCharsets.UTF_8);}catch(Exception ignored){}try{JSONArray ps=a.state.getJSONArray("projects");for(int i=0;i<ps.length();i++){JSONObject old=ps.getJSONObject(i).optJSONObject("autoRun");if(old!=null&&!Arrays.asList("done","stopped").contains(old.optString("phase"))){old.put("phase","stopped").put("message","应用重启，自动联动未恢复；请先核对Studio现有任务，避免重复提交");}}backfill();a.saveState();}catch(Exception ignored){}}

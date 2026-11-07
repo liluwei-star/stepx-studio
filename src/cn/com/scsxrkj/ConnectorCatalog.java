@@ -5,7 +5,13 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
-/** Public documentation only. Never imports account connections or grants execution rights. */
+/**
+ * 官方连接器目录（39 个连接器、358 项能力）。
+ *
+ * <p><b>只拉公开文档</b>：这里拿到的只是「这个连接器能干什么」的说明文字，
+ * 既不会导入用户的账号授权，也不会获得执行权限。要用某个连接器，
+ * 还是得去官方 Studio 里自己授权。
+ */
 final class ConnectorCatalog {
  static final String BASE="https://studio.stepx.com/api/integrate/connectors";
  final MainActivity a;volatile JSONObject data;volatile boolean running;

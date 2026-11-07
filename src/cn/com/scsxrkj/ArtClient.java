@@ -6,7 +6,12 @@ import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-/** Native image transport. Credentials are used only on the configured API origin. */
+/**
+ * 图片生成服务的 HTTP 传输层。
+ *
+ * <p>只负责把请求发出去、把图片二进制收回来。凭证只在用户配置的那个接口域名上使用，
+ * 不会被带到别的地址。支持取消，取消后连接立即断开。
+ */
 final class ArtClient {
  volatile boolean cancelled; volatile HttpURLConnection connection;
  final boolean debug; ArtClient(boolean debug){this.debug=debug;}

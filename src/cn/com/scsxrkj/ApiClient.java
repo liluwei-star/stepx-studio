@@ -4,6 +4,19 @@ import java.net.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 
+/**
+ * 云端 AI 接口的 HTTP 客户端，负责一次完整的「提问—流式收答案」。
+ *
+ * <p>做的事：
+ * <ul>
+ *   <li>把统一格式的对话转成各服务商要的请求体（OpenAI / Anthropic / DeepSeek 等）</li>
+ *   <li>用 SSE 边收边解析，让界面能实时看到文字一个个冒出来</li>
+ *   <li>累计这次请求消耗了多少 Token，按服务商返回的分段记进 usageSegments</li>
+ *   <li>支持随时取消：cancelled 置 true 后连接会被主动断开</li>
+ * </ul>
+ *
+ * <p>密钥只在这个类里用一次就丢，不会存进任何状态对象，也不会写进日志。
+ */
 class ApiClient {
  interface Progress {void update(String text,String reasoning);}
  Progress progress;final JSONArray usageSegments=new JSONArray();

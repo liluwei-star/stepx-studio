@@ -1,6 +1,12 @@
 package cn.com.scsxrkj.matrix;
 import org.json.*;
-/** Portable animation contract; no scripts, credentials or arbitrary tool names. */
+/**
+ * 背屏点阵动画的格式定义。
+ *
+ * <p>可移植的动画描述：只包含帧数据、颜色、帧率这些纯数据。
+ * <b>不允许脚本、不允许凭证、不允许调用任意工具</b>，防止动画文件变成攻击载体。
+ * 单文件上限 350KB。
+ */
 public final class MatrixSpec {
  public static JSONObject parse(String text)throws Exception{
   if(text.length()>350000)throw new Exception("点阵文件超过 350 KB");

@@ -2,7 +2,14 @@ package cn.com.scsxrkj;
 import org.json.*;
 import java.util.*;
 import java.util.concurrent.*;
-/** Project-scoped tools, operating on a staged snapshot until final validation. */
+/**
+ * AI 可调用的项目工具集。
+ *
+ * <p>模型在改代码时能通过这些工具实际动手：读文件、改文件、新建文件等。
+ *
+ * <p>关键约束：<b>所有操作都在暂存快照上做</b>，最后一次性校验并提交。
+ * 中途出错就整体丢弃，项目不会变成改了一半的烂摊子。
+ */
 final class LocalDevTools {
  final MainActivity a;final JSONObject original;JSONObject staged;final JSONArray calls=new JSONArray();int artCalls;
  LocalDevTools(MainActivity a,JSONObject project)throws Exception{this.a=a;original=project==null?null:new JSONObject(project.toString());staged=project==null?null:new JSONObject(project.toString());}

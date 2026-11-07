@@ -1,3 +1,22 @@
+/*
+ * projects.js —— 本地项目列表页的脚本
+ * ================================================================
+ *
+ * ── 本文件里所有按钮（data-a 动作）的含义 ──────────────────────────
+ *
+ *   projects            显示/刷新项目列表
+ *   openProject         打开某个项目，进入编辑器
+ *   projectMenu         弹出项目操作菜单
+ *   deleteProject       把项目移到「最近删除」（源码还在，可恢复）
+ *   restoreProject      从「最近删除」里恢复项目
+ *   purgeProject        彻底删除项目（连构建缓存一起删，不可恢复）
+ *   cloudUpload         把这个项目上传到官方云端
+ *   cloudRelay          云端接力开发：推到云端继续做
+ *
+ * 注意 trash（最近删除）页里会同时出现 restoreProject 和 purgeProject
+ * 两个按钮：前者恢复，后者彻底删除，删除前一定会弹确认框。
+ * ================================================================
+ */
 // Project list gestures. Vertical scrolling stays native; only intentional horizontal
 // drags reveal deletion. Keyboard and assistive-tech users have a visible menu.
 function projectRow(p){return `<div class="project-shell" data-project-id="${esc(p.id)}"><button class="danger swipe-delete" data-a="deleteProject" data-id="${esc(p.id)}" aria-label="删除项目 ${esc(p.name)}" aria-hidden="true" disabled>删除</button><div class="project project-slide"><button class="project-open" data-a="openProject" data-id="${esc(p.id)}"><span class="mark" aria-hidden="true">&lt;/&gt;</span><span class="grow"><strong>${esc(p.name)} ${projectLiveDot(p.id)}</strong><small>${Object.keys(p.files).length+Object.keys(p.binaryFiles||{}).length} 个文件${p.cloud?' · 已关联云端':''} · ${new Date(p.updated).toLocaleDateString()}</small></span></button><button class="project-relay" data-a="cloudRelay" data-id="${esc(p.id)}" aria-label="云端接力开发 ${esc(p.name)}" ${window.cloudRelayState?.status==='syncing'?'disabled':''}>云端接力</button><button class="project-upload" data-a="cloudUpload" data-id="${esc(p.id)}" aria-label="上传项目 ${esc(p.name)}">↑</button><button class="project-more" data-a="projectMenu" data-id="${esc(p.id)}" aria-label="项目菜单：${esc(p.name)}">⋯</button></div></div>`}

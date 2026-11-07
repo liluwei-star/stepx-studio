@@ -13,7 +13,24 @@ import java.util.*;
 import java.util.zip.*;
 import javax.security.auth.x500.X500Principal;
 
-/** Offline packaging of Web projects using the bundled, precompiled runtime. */
+/**
+ * 手机端离线出包：把纯前端项目编译成可安装的 APK。
+ *
+ * <p>整个过程完全在这台手机上完成：解包运行壳模板 → 换掉前端资源 →
+ * 改包名和版本号 → 用内置密钥签名 → 打包成 APK。不需要电脑、不需要联网。
+ *
+ * <p>三个可配置项：
+ * <ul>
+ *   <li><b>自定义包名</b>：留空则自动生成 {@code com.scsxrkj.app.<项目id>}。
+ *       用户填的包名会按 Android 规范校验：至少两段、每段以字母开头、
+ *       不能占用 android / com.android / com.google / com.stepos 等保留前缀</li>
+ *   <li><b>最小权限模板</b>：勾选后只声明联网权限，适合提交应用市场</li>
+ *   <li><b>版本号</b>：每次构建编号自动 +1</li>
+ * </ul>
+ *
+ * <p>签名用的是 {@code ~/.neo-signing/neo-release.p12}，minSdk 24，
+ * 自动选 v1+v2+v3 全部签名方案，兼容 Android 7 到最新版本。
+ */
 final class OfflineBuilder {
  /** 自定义包名：为空则返回空串，让调用方走自动生成。校验 Android 包名规范。 */
  static String customPackage(JSONObject p)throws Exception{

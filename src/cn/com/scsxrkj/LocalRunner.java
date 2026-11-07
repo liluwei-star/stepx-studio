@@ -12,7 +12,13 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Offline compiler and isolated project renderer. Neither WebView has an Android bridge. */
+/**
+ * 在手机本地运行项目，实时看效果。
+ *
+ * <p>先编译，再把编译产物塞进一个隔离的 WebView 里渲染。
+ * <b>这个 WebView 没有挂任何 JS 桥</b>，所以页面拿不到任何原生能力，
+ * 跑别人的代码也不会出事。控制台报错会显示在界面上，方便调试。
+ */
 final class LocalRunner {
  final MainActivity a; final JSONObject project; final Handler handler=new Handler();
  final Map<String,byte[]> files=new java.util.concurrent.ConcurrentHashMap<>();

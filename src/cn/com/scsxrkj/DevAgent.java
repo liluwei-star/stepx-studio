@@ -1,6 +1,19 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.io.InterruptedIOException;
+/**
+ * AI 开发代理：让模型能真的动项目文件。
+ *
+ * <p>普通对话只能吐文字，这个类给模型配了一套「工具」，模型可以主动调用：
+ * <ul>
+ *   <li>读文件、写文件、列目录</li>
+ *   <li>跑构建、看报错</li>
+ *   <li>生成图片</li>
+ * </ul>
+ *
+ * <p>一次任务内可能循环好几轮「模型要工具 → 执行 → 把结果喂回去」，
+ * 直到模型给出最终答复。所有文件改动都先在暂存区做，最后校验通过才落地。
+ */
 final class DevAgent {
  static JSONObject parse(String text)throws Exception{String s=text.trim();if(s.startsWith("```")){int i=s.indexOf('\n');s=s.substring(i+1);if(s.endsWith("```"))s=s.substring(0,s.length()-3);}return new JSONObject(s.trim());}
  static JSONObject run(MainActivity a,ApiClient client,JSONObject profile,String key,JSONArray messages,String system,JSONObject project,boolean debug)throws Exception{

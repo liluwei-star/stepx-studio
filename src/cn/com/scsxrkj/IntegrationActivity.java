@@ -9,7 +9,15 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
-/** Explicit, user-confirmed IPC. It returns results, never provider credentials. */
+/**
+ * 跨应用调用的中转站。
+ *
+ * <p>生成的 App 想用 AI 或回传调试报告时，会发一个显式 Intent 到这里。
+ * 这个类负责弹确认框、处理请求、把结果返回去。
+ *
+ * <p>安全上死守一条：<b>只返回结果，绝不返回任何密钥</b>。
+ * 调用方永远拿不到你的 API Key。
+ */
 public class IntegrationActivity extends Activity {
  static volatile boolean busy=false;
  static final Object STORE_LOCK=new Object();

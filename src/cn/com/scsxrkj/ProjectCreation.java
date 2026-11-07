@@ -2,7 +2,17 @@ package cn.com.scsxrkj;
 import org.json.*;
 import java.util.*;
 import java.util.regex.*;
-/** Explicit user requests create a separate project and conversation binding. */
+/**
+ * 判断用户的这句话是不是在要求「新建一个项目」。
+ *
+ * <p>只在明确的指令下才建，比如「新建项目」「做一个贪吃蛇」。
+ * 下面这些情况一律不建，避免误判造成满屏垃圾项目：
+ * <ul>
+ *   <li>整段是代码块</li>
+ *   <li>整段被引号包起来（说明是在引用别人的话）</li>
+ *   <li>超长文本</li>
+ * </ul>
+ */
 final class ProjectCreation {
  static boolean requested(String text){
   String s=text.trim();if(s.length()>80000||s.startsWith("```")||s.startsWith("\"")||s.startsWith("“")||s.startsWith("「"))return false;

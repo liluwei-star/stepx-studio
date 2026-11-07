@@ -1,6 +1,7 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.io.*;
+/** 整体自检：跑一批内置检查，确认核心功能没坏。只在调试版触发。 */
 final class SelfTest {
  static int passed;static JSONArray details;
  static void check(boolean b,String name)throws Exception{if(!b)throw new Exception("FAIL "+name);passed++;details.put(name);}

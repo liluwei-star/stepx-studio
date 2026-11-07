@@ -9,7 +9,12 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
-/** Local model weights are app-private data, never bundled in project exports. */
+/**
+ * 本地模型权重的下载、导入与管理。
+ *
+ * <p>模型文件属于应用的私有数据，存在应用自己的目录里。
+ * <b>绝不会被打进项目导出包</b>，也不会随项目上传到云端（动辄几个 GB）。
+ */
 final class LocalModels {
  final MainActivity a;volatile boolean running,cancelled;volatile JSONObject status=new JSONObject();
  LocalModels(MainActivity a){this.a=a;}

@@ -5,6 +5,12 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import com.google.ai.edge.litertlm.*;
+/**
+ * 本地离线模型客户端，继承 {@link ApiClient} 的接口但完全跑在手机里。
+ *
+ * <p>好处：不需要密钥，不产生 API 费用，断网也能用。
+ * 代价：速度取决于手机算力，长上下文会比较吃力。
+ */
 final class LocalAiClient extends ApiClient {
  final Context context;volatile Conversation conversation;
  LocalAiClient(Context c){context=c.getApplicationContext();}

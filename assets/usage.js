@@ -1,3 +1,20 @@
+/*
+ * usage.js —— Token 用量账本页的脚本
+ * ================================================================
+ *
+ * 记录每一次 AI 调用的耗时、输入输出 Token、缓存命中、费用来源，
+ * 让用户知道钱花在哪。
+ *
+ * ── 本文件里所有按钮（data-a 动作）的含义 ──────────────────────────
+ *
+ *   today               只看今天的用量
+ *   allUsage            看全部历史用量
+ *   usageExport         把账本导出成 CSV 表格（可用 Excel 打开）
+ *
+ * 账本里每一条记录包含：时间、来源（本地/云端）、项目、服务商、模型、
+ * 状态（成功/失败/取消/中断）、各类 Token 数量、耗时毫秒。
+ * ================================================================
+ */
 // Separate accounting boundaries; never infer usage from text length or model names.
 function usageSource(r){return r.source==='local_model'?'local_model':r.source==='studio'?'studio':r.source==='step_api'?'step_api':'external_api'}
 function usageTotals(rows){const t={input:0,output:0,total:0,cacheRead:0,cacheWrite:0,reasoning:0,unknown:0};for(const r of rows){if(!r.usage?.known){t.unknown++;continue}for(const k of ['input','output','total','cacheRead','cacheWrite','reasoning'])t[k]+=r.usage[k]||0}return t}

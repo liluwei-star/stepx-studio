@@ -2,7 +2,15 @@ package cn.com.scsxrkj;
 import org.json.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-/** Bounded SSE decoder; incomplete streams never become project writes. */
+/**
+ * 流式响应的解码器（SSE 格式）。
+ *
+ * <p>云端 AI 是一段段往回吐数据的，这个类负责把那些碎片拼成完整文字和思考过程，
+ * 顺便累计 Token 用量。
+ *
+ * <p>一条铁律：<b>流没完整结束就不许写文件</b>。
+ * 网络中途断了、被用户取消、输出被截断，都算不完整，一律不落地。
+ */
 final class StreamResponse {
  final StringBuilder text=new StringBuilder(),reason=new StringBuilder();JSONObject usage;String model="",finish="";boolean ended;
  void event(String data,boolean anthropic,ApiClient.Progress progress)throws Exception{

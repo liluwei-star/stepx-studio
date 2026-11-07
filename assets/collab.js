@@ -1,3 +1,51 @@
+/*
+ * collab.js —— 项目协作页的脚本
+ * ================================================================
+ *
+ * 这个文件负责「项目协作」页：把项目交给 AI 拆分任务、逐个执行，
+ * 以及构建出包、和官方 Studio 双向交接。
+ *
+ * ── 本文件里所有按钮（data-a 动作）的含义 ──────────────────────────
+ *
+ * 【页面导航】
+ *   backCollab          从子页面返回协作主页
+ *   backEditor          返回项目编辑器
+ *
+ * 【任务与自动联动】
+ *   addTask             给项目添加一条待办任务
+ *   runProjectTask      立刻执行某一条任务（把任务内容发给 AI）
+ *   startAuto           开始自动联动：AI 自动连续执行多步，不用一步步点
+ *   stopAuto            停止自动联动
+ *   cancel              取消当前正在跑的任务
+ *
+ * 【构建出包】
+ *   buildOffline        在本机构建 APK。会弹出选项让你填自定义包名、
+ *                       勾选是否用「最小权限」模板（只声明联网权限，适合上架）
+ *   buildInstall        构建完直接装到这台手机上
+ *   exportApk           把构建好的 APK 导出到手机存储，用于发给别人或上架
+ *   installApk          安装某一条历史构建
+ *   importDebug         导入生成的 App 回传的调试报告 JSON
+ *
+ * 【AI 结果审查】
+ *   reviewReply         审查 AI 这次回复，看它改了什么
+ *   importChanges       把 AI 建议的改动导入项目
+ *   applyCandidate      应用一批候选文件（通常是导入时 AI 分拣的结果）
+ *   restoreSnapshot     把项目回滚到上一版快照
+ *   copyResult          复制 AI 的输出结果
+ *   exportContext       把当前项目上下文导出成文件，方便交给外部 AI
+ *
+ * 【官方 Studio 协作】
+ *   linkStudio          把本地项目关联到官方 Studio 的某个项目页面
+ *   captureStudio       抓取官方 Studio 页面上可见的文字，存成项目上下文
+ *   handoffStep         把本地内容填进官方 Studio 的输入框（只填不发送）
+ *   openStudioProject   打开关联的官方 Studio 项目页
+ *   handoffAmoo         把任务交给 Amoo（系统 AI 启动器）去执行
+ *
+ * 【其他】
+ *   settings            打开设置
+ *
+ * ================================================================
+ */
 'use strict';
 let buildBusy=false;
 let candidateBase=null,candidateProjectId=null;

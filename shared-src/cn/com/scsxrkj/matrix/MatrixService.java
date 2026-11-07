@@ -1,6 +1,12 @@
 package cn.com.scsxrkj.matrix;
 import android.app.*;import android.content.*;import android.content.pm.ServiceInfo;import android.os.*;import org.json.*;import java.io.*;import java.util.concurrent.*;
-/** A native, user-started player. Simulation is explicitly distinct from physical delivery. */
+/**
+ * 背屏点阵的播放服务。
+ *
+ * <p>做成前台服务是为了让画面能在应用退到后台后继续播。
+ * <b>「模拟播放」和「真实驱动硬件」是两条明确分开的路径</b>，
+ * 界面上也不会把两者混为一谈。
+ */
 public final class MatrixService extends Service {
  static volatile boolean alive;long renewAt;
  static final String CHANNEL="neo-matrix";static final int NOTIFY=391;

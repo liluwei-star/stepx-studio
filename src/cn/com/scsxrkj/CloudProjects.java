@@ -6,7 +6,13 @@ import android.net.Uri;
 import org.json.*;
 import java.util.*;
 import java.nio.charset.StandardCharsets;
-/** Scoped Studio file transfer, using the official page's own logged-in fetch context. */
+/**
+ * 本地与官方 Studio 云端的项目传输。
+ *
+ * <p>关键点：<b>复用官方网页自己的登录态</b>。做法是把上传/下载的 fetch 请求
+ * 注入到已经登录的 Studio 页面里执行，所以不需要用户另外提供 token，
+ * 也不碰任何私有接口。
+ */
 final class CloudProjects {
  CloudRelay relay;final MainActivity a;boolean running,batchRunning,batchStopped;int batchIndex=-1;JSONObject batch;int generation;ProgressDialog dialog;
  interface Result{void accept(JSONObject r)throws Exception;}

@@ -1,7 +1,15 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.util.*;
-/** Pure, atomic project-file transitions, bound to an exact request baseline. */
+/**
+ * 项目文件的编辑与回滚，是「AI 改代码」这件事的安全底座。
+ *
+ * <p>核心设计：<b>改动必须绑定一个确切的基线</b>。AI 看到的是某一版文件，
+ * 提交改动时也要声明是基于哪一版改的。如果这期间用户手动改过，
+ * 基线对不上就拒绝写入，防止把用户的改动冲掉。
+ *
+ * <p>整个过程是原子的：要么整批改动全部生效，要么一个都不生效。
+ */
 final class ProjectEdits {
  static boolean same(JSONObject a,JSONObject b)throws Exception{if(a.length()!=b.length())return false;Iterator<String> it=a.keys();while(it.hasNext()){String k=it.next();if(!b.has(k)||!Objects.equals(a.get(k),b.get(k)))return false;}return true;}
  static JSONObject parse(String text)throws Exception{

@@ -1,7 +1,12 @@
 package cn.com.scsxrkj.matrix;
 import android.content.*;import android.database.Cursor;import android.net.Uri;import android.security.keystore.*;import android.util.Base64;
 import org.json.*;import javax.crypto.*;import javax.crypto.spec.GCMParameterSpec;import java.security.*;import java.net.*;import java.io.*;
-/** Independent implementation of the observed device MCP protocol. Identity is verified by StepOS. */
+/**
+ * 背屏点阵通信协议的实现。
+ *
+ * <p>走的是本机回环口的 HTTP + nonce 挑战应答，身份由 StepOS 系统来校验。
+ * 不申请任何隐藏 API 豁免，也不改 Binder 身份，就是按正常协议走。
+ */
 public final class MatrixConnection {
  final Context context;int port;String nonce;int sequence;volatile HttpURLConnection active;
  public MatrixConnection(Context c){context=c.getApplicationContext();}

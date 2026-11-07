@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | 包名 | `cn.com.scsxrkj` |
-| 当前版本 | 0.0.1（versionCode 2） |
+| 当前版本 | 0.1.0（versionCode 2） |
 | 适用机型 | STEPX Neo（PZ261A） |
 | 系统要求 | Android 11 及以上（minSdk 30） |
 | 安装包大小 | 约 17 MB |
@@ -508,7 +508,7 @@ export NEO_SIGNING_DIR="$HOME/.neo-signing-studio"
 ### 发版
 
 ```bash
-./release.sh                    # 补丁位 +1（0.0.1 → 0.0.2）
+./release.sh                    # 补丁位 +1（0.1.0 → 0.0.2）
 ./release.sh 0.1.0              # 指定版本号
 ./release.sh 0.1.0 "改动说明"    # 带发版说明
 ./release.sh --dry-run 0.0.2    # 只预览，不执行

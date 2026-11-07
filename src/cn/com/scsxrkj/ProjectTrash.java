@@ -1,6 +1,17 @@
 package cn.com.scsxrkj;
 import org.json.*;
-/** Pure state transitions; caller atomically persists before announcing success. */
+/**
+ * 项目的「最近删除」（回收站）。
+ *
+ * <p>删项目分两级：
+ * <ul>
+ *   <li><b>移到最近删除</b>：只是打个标记，源码、协作记录、快照全都还在，随时能恢复</li>
+ *   <li><b>彻底删除</b>：真的删掉，连同工作台里缓存的构建 APK 一起清，不可恢复</li>
+ * </ul>
+ *
+ * <p>这个类是纯状态变换，自己不做落盘。调用方负责先把新状态原子地存下来，
+ * 存成功了才算真的删掉了。
+ */
 final class ProjectTrash {
  static JSONArray trash(JSONObject s){JSONArray a=s.optJSONArray("projectTrash");return a==null?new JSONArray():a;}
  static int index(JSONArray a,String id,boolean bin)throws Exception{for(int i=0;i<a.length();i++){JSONObject p=a.getJSONObject(i);if(bin)p=p.getJSONObject("project");if(id.equals(p.optString("id")))return i;}return -1;}

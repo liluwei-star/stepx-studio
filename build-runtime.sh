@@ -35,7 +35,7 @@ echo "      class 文件：$(find out/runtime/classes -name '*.class' | wc -l)"
 echo "[3/5] D8 转 dex"
 find out/runtime/classes -name '*.class' -print0 | xargs -0 \
   "$JDKW\\bin\\java.exe" -cp "$(cygpath -w vendor/tools/r8-9.5.26.jar)" \
-  com.android.tools.r8.D8 --min-api 30 \
+  com.android.tools.r8.D8 --min-api 24 \
   --lib "$SDKW/platforms/android-36/android.jar" --output out/runtime/dex
 
 echo "[4/5] 链接两个变体的 Manifest"

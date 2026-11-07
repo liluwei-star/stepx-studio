@@ -6,7 +6,14 @@ import javax.crypto.*;
 import javax.crypto.spec.GCMParameterSpec;
 import java.security.KeyStore;
 
-/** Secrets never leave native code after entry; Android Keystore key is not exportable. */
+/**
+ * 密钥保险箱：所有 API Key 都存在这里。
+ *
+ * <p>用 Android Keystore 生成一把<b>无法导出</b>的密钥来加密。
+ * 意思是：就算有人把应用数据整个拷走，没有那台手机的硬件密钥也解不开。
+ *
+ * <p>密钥从输入那一刻起就只在原生代码里流转，永远不进 WebView。
+ */
 final class Vault {
  private final Context ctx;
  Vault(Context c){ctx=c;}

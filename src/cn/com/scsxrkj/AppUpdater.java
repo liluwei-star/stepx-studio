@@ -12,7 +12,23 @@ import java.security.*;
 import java.util.*;
 import org.json.*;
 
-/** Native GitHub updater. Tokens never enter a WebView, redirect, APK or export. */
+/**
+ * 检查 GitHub 上有没有新版本的更新器。
+ *
+ * <p>流程：请求 GitHub Releases API → 找到最新正式版 → 比对版本号 →
+ * 下载 APK → 校验 SHA-256 → 交给系统安装器。
+ *
+ * <p>三个安全约束：
+ * <ul>
+ *   <li>只认正式 Release，草稿和预发布版一律忽略</li>
+ *   <li>资产文件名必须匹配 {@code StepXStudio-<版本>-release.apk}，
+ *       防止 Release 说明里随便贴个链接就能诱导安装</li>
+ *   <li>下载完必须核对 SHA-256，对不上就不装</li>
+ * </ul>
+ *
+ * <p>GitHub 令牌只在原生层使用，绝不进入 WebView、跳转链接、APK 或导出文件。
+ * 自动检查默认关闭，需要用户在设置里自己打开。
+ */
 final class AppUpdater {
  static final String REPO="liluwei-star/stepx-studio",KEY="github-updates";
  final MainActivity a;final android.content.SharedPreferences prefs;volatile boolean busy,cancelled;volatile HttpURLConnection connection;

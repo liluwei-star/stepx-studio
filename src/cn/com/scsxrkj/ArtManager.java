@@ -3,7 +3,17 @@ import org.json.*;
 import android.util.Base64;
 import android.graphics.BitmapFactory;
 import java.util.*;
-/** Drawing profiles stay in host state; only image bytes and provenance enter projects. */
+/**
+ * 绘图配置与任务的管理器。
+ *
+ * <p>分得清两件事：
+ * <ul>
+ *   <li><b>绘图配置</b>（接口地址、密钥、模型）只留在工作台的状态里，不进项目</li>
+ *   <li><b>生成的图片</b>连同来源信息（用的是哪个服务、什么提示词）一起存进项目</li>
+ * </ul>
+ *
+ * <p>这样项目导出、上传云端时不会把密钥带出去。
+ */
 final class ArtManager {
  final MainActivity a; volatile boolean busy;volatile ArtClient current;
  ArtManager(MainActivity a){this.a=a;}

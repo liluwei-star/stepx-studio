@@ -1,3 +1,22 @@
+/*
+ * local-models.js —— 本地离线模型管理页的脚本
+ * ================================================================
+ *
+ * 让用户把大模型权重下载到手机里，断网也能用 AI，不产生 API 费用。
+ *
+ * ── 按钮动作 ────────────────────────────────────────────────────
+ *
+ *   ai                  在这个页面里也能直接发 AI 请求（走已选中的本地模型）
+ *
+ * 其他交互通过 Neo.action 触发，动作名见 MainActivity 里的 case：
+ *   localModelInspect   检查模型文件是否可用
+ *   localModelDownload  开始下载模型
+ *   localModelCancel    取消下载
+ *   localModelSelect    选中某个模型
+ *   localModelDelete    删除模型文件
+ *   localModelImport    从手机文件导入模型
+ * ================================================================
+ */
 'use strict';
 let localModelCatalog=null,localModelStatus={},localSelected=null;
 function refreshLocalModelProgress(){const e=document.querySelector('#localDownloadProgress');if(e){const s=localModelStatus||S.localModelStatus||{};e.textContent=(s.stage||'')+(s.total?' · '+Math.min(100,Math.round(s.bytes/s.total*100))+'%':'')+(s.bytes?' · '+(s.bytes/1073741824).toFixed(2)+' GB':'');}}

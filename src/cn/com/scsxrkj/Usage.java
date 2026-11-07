@@ -1,6 +1,11 @@
 package cn.com.scsxrkj;
 import org.json.*;
-/** All values originate in provider usage. Detail fields are subsets, not extra totals. */
+/**
+ * 判断一次调用算在哪个来源头上（云端 API / 本地模型 / 官方网页版）。
+ *
+ * <p>Token 账本里所有数字都来自服务商真实返回的用量字段。
+ * 明细字段是总量的拆分，不会额外累加成新总数。
+ */
 final class Usage {
  static String source(JSONObject profile){
   if(profile.optString("protocol").equals("local"))return "local_model";

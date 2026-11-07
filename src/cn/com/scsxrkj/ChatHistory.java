@@ -1,7 +1,12 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.util.*;
-/** Batch deletion preserves accounting records and their project attribution. */
+/**
+ * 批量删除对话记录。
+ *
+ * <p>删对话时只删对话本身，<b>Token 账本和它记录的项目归属要保留</b>，
+ * 否则历史用量会凭空少掉，费用对不上账。
+ */
 final class ChatHistory {
  static JSONArray existingIds(JSONObject state,JSONArray requested)throws Exception{
   Set<String> wanted=new HashSet<>();for(int i=0;i<requested.length();i++){String id=requested.optString(i,"");if(!id.isEmpty())wanted.add(id);}JSONArray ids=new JSONArray(),chats=state.getJSONArray("chats");for(int i=0;i<chats.length();i++){String id=chats.getJSONObject(i).optString("id");if(wanted.remove(id))ids.put(id);}return ids;

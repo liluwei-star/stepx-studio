@@ -1,3 +1,88 @@
+/*
+ * app.js —— 本地工作台的主界面脚本
+ * ================================================================
+ *
+ * 这是 StepX Studio 本地界面的核心文件。页面结构在 index.html 里用内联
+ * HTML 字符串拼出来，所有交互逻辑都在这个文件里。
+ *
+ * 与原生通信的方式：
+ *   调用  window.Neo.action(type, JSON字符串)   → 交给 MainActivity.Bridge
+ *   接收  window.receive(type, data)            → 原生推过来的事件
+ *
+ * ── 本文件里所有按钮（data-a 动作）的含义 ──────────────────────────
+ *
+ * 【项目】
+ *   projects            打开「本地项目」列表
+ *   projectList         刷新项目列表
+ *   newProject          新建一个空项目
+ *   renameProject       改项目名字
+ *   deleteProject       把项目移到「最近删除」（可恢复）
+ *   trash               打开「最近删除」页，里面能恢复或彻底删除
+ *   restoreSnapshot     把项目回滚到上一版快照（只保留最近一版）
+ *   exportProject       把项目全部文件打成 ZIP 导出
+ *   importProject       【导入 HTML / ZIP】把外面做好的网页项目搬进本应用。
+ *                       点下去会打开手机的文件选择器，两种选法：
+ *                         · 选 .zip 压缩包 → 解出里面最多 40 个文本文件（html/css/js/
+ *                           图片路径等），当成一个完整的多文件项目
+ *                         · 选单个 .html 文件 → 只有一个页面，当成单文件项目
+ *                       两种情况都要求包里必须有 index.html，否则拒绝导入
+ *                       （因为生成的 App 一启动就是找 index.html 来显示的）。
+ *                       总大小限制 2 MB，超了会提示。导入后出现在「本地项目」列表。
+ *   reviewAiFiles       审查 AI 改过的文件，逐条决定接受还是丢弃
+ *   collab              进入「项目协作」页（任务、构建、Studio 联动都在里面）
+ *   builds              打开「构建与调试」页
+ *   preview             在手机本地预览项目效果（断网隔离，不联网）
+ *   openStudioProject   打开项目关联的官方 Studio 网页
+ *
+ * 【文件编辑】
+ *   file                打开某个文件开始编辑
+ *   addFile             新建一个文件
+ *   deleteFile          删除一个文件
+ *   applyHtml           把编辑器里的 HTML 内容应用回项目
+ *   undo                撤销上一次编辑
+ *   redo                重做被撤销的编辑
+ *   indent              自动整理代码缩进
+ *   findCode            在代码里查找文字
+ *   copyCode            复制代码到剪贴板
+ *
+ * 【AI 对话】
+ *   ai                  发送一条 AI 请求
+ *   aiCode              让 AI 直接生成/修改代码
+ *   send                发送输入框里的消息
+ *   cancel              取消正在跑的 AI 请求
+ *   newChat             新建一段对话
+ *   chatHistory         查看历史对话列表
+ *   deleteChat          删除一段对话（只删对话，项目文件保留）
+ *   exportChat          把对话导出成文本文件
+ *   copyMessage         复制某一条消息
+ *
+ * 【模型配置】
+ *   settings            打开「模型与 API」设置页
+ *   editProfile         编辑某个模型配置
+ *   saveProfile         保存模型配置
+ *   deleteProfile       删除模型配置
+ *   freshProfile        新建一个模型配置
+ *   testProfile         测试这个配置能不能连通
+ *   detectModels        让服务商返回它支持哪些模型
+ *   localModels         打开「本地模型」页（下载/导入离线模型）
+ *
+ * 【云端同步】
+ *   cloudList           拉取官方云端上的项目列表
+ *   cloudUpload         把某个项目上传到云端
+ *   cloudUploadAll      把所有本地项目一次性上传
+ *   cloudPull           把云端项目下载到本地
+ *   cloudRelay          云端接力开发：传到云端继续做
+ *   cloudCancel         取消正在进行的同步
+ *
+ * 【其他】
+ *   studio              切换到官方 Studio 网页
+ *   help                打开「关于与使用说明」
+ *   license             查看第三方开源许可
+ *   checkUpdates        检查 GitHub 上有没有新版本
+ *   backEditor          从子页面返回编辑器
+ *
+ * ================================================================
+ */
 'use strict';
 const $=s=>document.querySelector(s),app=$('#app'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uuid=()=>crypto.randomUUID(),send=(a,p={})=>Neo.action(a,JSON.stringify(p)),num=n=>Number(n||0).toLocaleString('zh-CN');

@@ -1,6 +1,11 @@
 package cn.com.scsxrkj;
 import org.json.*;
-/** GitHub stable releases only. Never infer a package from arbitrary links in release prose. */
+/**
+ * 解析 GitHub Release 里的一个发布版本。
+ *
+ * <p>只认正式发布（非草稿、非预发布）。<b>绝不从 Release 说明文字里猜下载地址</b>，
+ * 必须是有明确文件名和 SHA-256 的资产，防止发布说明被篡改后诱导安装恶意包。
+ */
 final class UpdateRelease {
  final String version,notes,url,sha;final long assetId,size;
  UpdateRelease(String v,String n,String u,String h,long id,long bytes){version=v;notes=n;url=u;sha=h;assetId=id;size=bytes;}

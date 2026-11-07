@@ -3,7 +3,12 @@ import android.content.res.AssetManager;
 import java.io.*;
 import java.util.Locale;
 
-/** Serves only files packaged inside this app, retaining binary bytes and nested paths. */
+/**
+ * 读取打包在 APK 里的运行壳资源。
+ *
+ * <p>只认包内的文件，路径做了严格校验：不许绝对路径、不许反斜杠、不许 .. 穿越，
+ * 长度也有限制。二进制内容按原字节返回，不做编码转换。
+ */
 final class RuntimeAssets {
  static boolean path(String p){
   if(p==null||p.isEmpty()||p.length()>240||p.startsWith("/")||p.indexOf('\\')>=0)return false;

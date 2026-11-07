@@ -4,7 +4,12 @@ import android.os.Handler;
 import org.json.*;
 import java.util.concurrent.*;
 import java.nio.charset.StandardCharsets;
-/** Runs the same bundled offline compiler used by the visible preview. */
+/**
+ * 项目编译：把 TSX / React / TypeScript 源码转成浏览器能跑的 JS。
+ *
+ * <p>用的是打包在 APK 里的 esbuild（WebAssembly 版），所以不需要联网也不需要装 Node。
+ * 编译失败会把具体错误行报给用户，不会静默生成一个坏包。
+ */
 final class LocalCompiler {
  static JSONObject compile(MainActivity a,JSONObject project)throws Exception{
   JSONObject snapshot=new JSONObject(project.toString());CloudFiles.entries(snapshot);CountDownLatch done=new CountDownLatch(1);JSONObject[] result={null};WebView[] view={null};Handler handler=new Handler(a.getMainLooper());

@@ -1,5 +1,6 @@
 package cn.com.scsxrkj.matrix;
 import android.app.*;import android.widget.*;import android.content.pm.*;import java.security.*;
+/** 背屏功能相关的系统设置入口：权限申请、常亮设置等。 */
 public final class MatrixSettings {
  public static void permissions(Activity a){
   if(android.os.Build.VERSION.SDK_INT>=33&&a.checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=0){a.requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},391);return;}

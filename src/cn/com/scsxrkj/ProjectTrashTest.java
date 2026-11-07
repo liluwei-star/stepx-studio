@@ -1,7 +1,7 @@
 package cn.com.scsxrkj;
 import org.json.*;
 import java.io.*;
-/** Debug-only fixture tests. Never mutates the user's workspace. */
+/** 回收站模块的自检。只会构造临时数据，绝不碰用户真实的工作区。 */
 final class ProjectTrashTest {
  static JSONArray checks;interface Attempt{void run()throws Exception;}
  static void ok(boolean x,String n)throws Exception{if(!x)throw new Exception(n);checks.put(n);}

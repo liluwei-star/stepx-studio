@@ -1,5 +1,6 @@
 package cn.com.scsxrkj;
 import org.json.*;import java.io.*;
+/** 云端文件模块的自检。只在调试版触发，不访问网络和用户数据。 */
 final class CloudFilesTest {
  static JSONArray checks;interface Attempt{void run()throws Exception;}
  static void ok(boolean b,String n)throws Exception{if(!b)throw new Exception(n);checks.put(n);}

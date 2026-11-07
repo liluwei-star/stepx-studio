@@ -4,7 +4,14 @@ import java.util.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import android.util.Base64;
-/** Cloud source snapshots and conservative three-way merge. No network or state writes. */
+/**
+ * 云端项目的文件快照与三方合并。
+ *
+ * <p>纯函数集合：不做网络请求，也不写状态，只负责算。
+ *
+ * <p>核心是「保守三方合并」：本地改了、云端也改了同一个文件时，
+ * 不猜哪个对，直接报冲突让用户处理，绝不悄悄覆盖掉别人的改动。
+ */
 final class CloudFiles {
  static boolean path(String p){if(p==null||p.isEmpty()||p.length()>240||p.startsWith("/")||java.util.regex.Pattern.compile("[\\\\\\x00-\\x1f\\x7f]").matcher(p).find())return false;for(String s:p.split("/",-1))if(s.isEmpty()||s.equals(".")||s.equals(".."))return false;return true;}
  static boolean excluded(String p){return p.matches("(?i)(?:.*/)?(?:\\.git|node_modules|\\.gradle|build|dist|\\.next|\\.cache)(?:/.*)?")||p.matches("(?i)(?:.*/)?(?:\\.env(?:\\..*)?|credentials(?:\\..*)?|secrets?(?:\\..*)?|local\\.properties|capsule\\.properties|id_rsa|id_ed25519)")||p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)");}
