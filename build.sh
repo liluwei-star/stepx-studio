@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+SDK="${ANDROID_SDK_ROOT:?Set ANDROID_SDK_ROOT}"
+JDK="${JAVA_HOME:?Set JAVA_HOME}"
+BT="$SDK/build-tools/36.0.0"
+MODE="${1:-release}"
+python3 prepare-local-ai.py
+KEYDIR="${NEO_SIGNING_DIR:?Set NEO_SIGNING_DIR}"
+mkdir -p "$KEYDIR" out dist
+chmod 700 "$KEYDIR"
+if [ ! -f "$KEYDIR/keystore.p12" ]; then
+  umask 077
+  /usr/bin/openssl rand -hex 24 > "$KEYDIR/password"
+  "$JDK/bin/keytool" -genkeypair -keystore "$KEYDIR/keystore.p12" -storepass:file "$KEYDIR/password" -keypass:file "$KEYDIR/password" -alias neo -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=StepX Studio, O=scsxrkj, C=CN' >/dev/null 2>&1
+fi
+rm -rf out/classes out/dex out/compiled.zip
+mkdir -p out/classes out/dex out/gen
+cp AndroidManifest.xml out/AndroidManifest.xml
+if [ "$MODE" = debug ] || [ "$MODE" = update-test ]; then
+python3 - <<'PY'
+from pathlib import Path
+p=Path('out/AndroidManifest.xml');s=p.read_text().replace('android:usesCleartextTraffic="false"','android:usesCleartextTraffic="true" android:debuggable="true"');p.write_text(s)
+PY
+fi
+# QA bootstrap only: 以低版本号构建，用于验证覆盖升级
+if [ "$MODE" = update-test ]; then
+  python3 - <<'PYTEST'
+from pathlib import Path
+import re
+p = Path('out/AndroidManifest.xml')
+s = p.read_text()
+cur_code = int(re.search(r'versionCode="(\d+)"', s).group(1))
+cur_name = re.search(r'versionName="([^"]+)"', s).group(1)
+s = re.sub(r'android:versionCode="\d+"', 'android:versionCode="%d"' % (cur_code - 1), s)
+s = re.sub(r'android:versionName="[^"]+"', 'android:versionName="0.0.0"', s)
+p.write_text(s)
+PYTEST
+fi
+"$BT/aapt2" compile --dir res -o out/compiled.zip
+"$BT/aapt2" link -o out/resources.apk -I "$SDK/platforms/android-36/android.jar" --manifest out/AndroidManifest.xml --java out/gen -A assets out/compiled.zip
+# 关键：不要用 -source 8 -target 8 -bootclasspath。
+#       vendor/local-ai 的 litertlm 是 Java 21 字节码（class 65），低版本 target 会拒绝加载；
+#       且 -bootclasspath 在 JDK 21 上会报「平台类路径上找不到 java.lang」。
+"$JDK/bin/javac" -classpath "vendor/apksig-android-4.4.0.jar:vendor/local-ai/*:$SDK/platforms/android-36/android.jar:$BT/core-lambda-stubs.jar" \
+  -encoding UTF-8 -source 17 -target 17 -nowarn -d out/classes \
+  src/cn/com/scsxrkj/*.java shared-src/cn/com/scsxrkj/matrix/*.java
+find out/classes -name '*.class' -print0 | xargs -0 "$JDK/bin/java" -cp vendor/tools/r8-9.5.26.jar com.android.tools.r8.D8 --min-api 30 --lib "$SDK/platforms/android-36/android.jar" --output out/dex vendor/apksig-android-4.4.0.jar vendor/local-ai/*.jar
+python3 - <<'PY'
+from pathlib import Path
+import zipfile,shutil
+shutil.copyfile('out/resources.apk','out/unaligned.apk')
+with zipfile.ZipFile('out/unaligned.apk','a',zipfile.ZIP_DEFLATED) as z:
+ for p in Path('out/dex').glob('*.dex'):z.write(p,p.name)
+ for p in Path('vendor/local-ai/jni/arm64-v8a').glob('*.so'):z.write(p,'lib/arm64-v8a/'+p.name)
+PY
+"$BT/zipalign" -f 4 out/unaligned.apk out/aligned.apk
+VER=$(python3 -c "import re,sys;s=open('AndroidManifest.xml').read();print(re.search(r'android:versionName=\"([^\"]+)\"',s).group(1))")
+OUT="dist/StepXStudio-$VER-$MODE.apk"
+JAVA_HOME="$JDK" "$BT/apksigner" sign --ks "$KEYDIR/keystore.p12" --ks-key-alias neo --ks-pass "file:$KEYDIR/password" --out "$OUT" out/aligned.apk
+JAVA_HOME="$JDK" "$BT/apksigner" verify --verbose "$OUT"
+(cd dist && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
