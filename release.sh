@@ -213,19 +213,23 @@ git add -A
 git commit -q -m "Release $NEW_VERSION" 2>/dev/null || echo "  （无文件变化，跳过提交）"
 push_ok=0
 TOKEN=$(gh auth token 2>/dev/null || true)
-for attempt in 1 2 3 4 5; do
-  if GIT_TERMINAL_PROMPT=0 git -c http.version=HTTP/1.1 push origin main 2>&1 | tail -2 | grep -q "main"; then
+# 只重试 2 次，每次 60 秒硬超时。
+# 之前没有 timeout、重试 5 次，网络半通的时候会卡在 git push 上几十分钟，
+# 日志停在「推送失败，第 2 次重试...」再也不动 —— API 兜底永远走不到。
+# 这条网络上 git push 本来成功率就低，早点降级比死等强。
+for attempt in 1 2; do
+  if timeout 60 env GIT_TERMINAL_PROMPT=0 git -c http.version=HTTP/1.1 push origin main 2>&1 | tail -2 | grep -q "main"; then
     push_ok=1; break
   fi
   if [ -n "$TOKEN" ]; then
-    if GIT_TERMINAL_PROMPT=0 git -c http.version=HTTP/1.1 \
+    if timeout 60 env GIT_TERMINAL_PROMPT=0 git -c http.version=HTTP/1.1 \
         push "https://x-access-token:${TOKEN}@github.com/${GH_REPO}.git" main 2>&1 \
         | sed "s/${TOKEN}/***/g" | tail -2 | grep -q "main"; then
       push_ok=1; break
     fi
   fi
-  echo "  推送失败，第 $attempt 次重试..."
-  sleep 10
+  echo "  推送失败，第 $attempt 次（最多 2 次，之后走 API）..."
+  sleep 5
 done
 if [ "$push_ok" != "1" ]; then
   # ── 兜底：走 GitHub Git Data API 推送 ──────────────────────
