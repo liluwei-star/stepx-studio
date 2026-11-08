@@ -1236,7 +1236,8 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
 
    /* 保存绘图服务的 API 配置（地址、密钥、模型） */ case "artProfile":art.saveProfile(p);break;/* 打开绘图 API 设置页 */ case "artSettings":art.settings(p);break;/* 删除一个绘图配置 */ case "artDelete":art.delete(p.getString("id"));break;/* 检测该绘图服务有哪些可用模型 */ case "artModels":art.detect(p.getString("id"));break;/* 开始生成图片（词生图） */ case "artGenerate":art.start(p,false);break;/* 继续上次中断的图片生成 */ case "artResume":art.start(p,true);break;/* 取消正在跑的绘图任务 */ case "artCancel":art.cancel();break;
    /* 云端接力开发：把项目推到官方云端继续做 */ case "cloudRelay":cloud.relay(p.getString("id"));break;/* 把所有本地项目一次性上传到云端 */ case "cloudUploadAll":cloud.uploadAll();break;/* 取消正在进行的云端同步 */ case "cloudCancel":cloud.cancel();break;/* 拉取云端项目列表 */ case "cloudList":cloud.list();break;/* 把云端项目下载到本地 */ case "cloudPull":cloud.pullLocal(p.getString("id"));break;/* 把单个项目上传到云端 */ case "cloudUpload":cloud.upload(p.getString("id"));break;/* 打开或关闭 AI 助手总开关 */ case "aiEnabled":setAiEnabled(p.getBoolean("value"));break;
-   /* 查看本地模型文件的信息（大小、格式是否可用） */ case "localModelInspect":localModels.inspect(p);break;/* 下载模型权重到手机 */ case "localModelDownload":localModels.download(p);break;/* 取消模型下载 */ case "localModelCancel":localModels.cancelled=true;break;/* 选中某个本地模型作为当前使用 */ case "localModelSelect":localModels.select(p);break;/* 删除已下载的本地模型文件 */ case "localModelDelete":localModels.delete(p.getString("id"));break;/* 从手机文件里导入模型 */ case "localModelImport":startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),27);break;
+   /* 查看本地模型文件的信息（大小、格式是否可用） */ case "localModelInspect":localModels.inspect(p);break;/* 下载模型权重到手机 */ case "localModelDownload":localModels.download(p);break;/* 取消模型下载 */ case "localModelCancel":localModels.cancelled=true;break;
+   /* 选中某个本地模型作为当前使用 */ case "localModelSelect":localModels.select(p);break;/* 删除已下载的本地模型文件 */ case "localModelDelete":localModels.delete(p.getString("id"));break;/* 从手机文件里导入模型 */ case "localModelImport":startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),27);break;
    /* 同步官方连接器目录（39 个连接器、358 项能力） */ case "connectorSync":connectors.sync();break;/* 在官方网页打开某个连接器的说明页 */ case "connectorOpen":String cid=p.optString("id");if(!cid.isEmpty())connectors.describe(cid,"",0);studio.loadUrl("https://studio.stepx.com/connectors"+(cid.isEmpty()?"":"/"+cid));show("studio");break;
    /* 保存联网搜索配置。密钥留空表示「不改动」—— 页面上不回显密钥，用户不该被迫每次重填 */ case "netSettings":{android.content.SharedPreferences.Editor e=prefs.edit();if(p.has("searchProvider"))e.putString("searchProvider",p.optString("searchProvider","").trim());String sk=p.optString("searchKey","").trim();if(!sk.isEmpty())e.putString("searchKey",sk);if(p.optBoolean("clearKey",false))e.remove("searchKey");e.apply();boolean on=!prefs.getString("searchKey","").trim().isEmpty();toast(on?"联网搜索已保存":"联网搜索已关闭");}break;
    /* 保存 GitHub 配置。同样：Token 留空表示不改 */ case "githubSettings":{android.content.SharedPreferences.Editor e=prefs.edit();String tk=p.optString("ghToken","").trim();if(!tk.isEmpty())e.putString("ghToken",tk);if(p.has("ghOwner"))e.putString("ghOwner",p.optString("ghOwner","").trim());if(p.has("ghRepo"))e.putString("ghRepo",p.optString("ghRepo","").trim());if(p.optBoolean("clearToken",false))e.remove("ghToken");e.apply();toast(prefs.getString("ghToken","").isEmpty()?"GitHub 已断开":"GitHub 配置已保存");}break;
@@ -1258,7 +1259,22 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    /* 保存模型/API 配置（地址、密钥、模型 ID） */ case "profile":ApiClient.endpoint(p.getString("endpoint"),p.optString("protocol"),debug);String key=p.optString("key","").trim();String next=p.optString("next","");p.remove("next");p.remove("key");p.remove("hasKey");if(key.isEmpty()){JSONObject old=null;try{old=byId("profiles",p.getString("id"));}catch(Exception ignored){}if(old!=null&&!old.optString("endpoint").equals(p.optString("endpoint")))throw new Exception("更换接口地址时请重新填写密钥，避免误发到其他服务");}if(!key.isEmpty())vault.put(p.getString("id"),key);upsert("profiles",p);sendState();event("profileSaved",new JSONObject().put("id",p.getString("id")).put("next",next));toast("模型配置已保存");if(next.equals("detect"))detectModels(p);break;
    /* 把审查通过的 AI 改动正式写进项目 */ case "applyProjectFiles":applyProjectFiles(p);break;/* 把项目回滚到上一版快照 */ case "restoreProjectFiles":restoreProjectFiles(p);break;
    /* 向服务商拉取可用模型列表 */ case "models":detectModels(byId("profiles",p.getString("id")));break;/* 发送一次 AI 请求（核心功能） */ case "send":sendAi(p);break;
-   /* 取消当前正在跑的 AI 或绘图任务 */ case "cancel":art.cancel();if(active!=null)active.cancel();break;
+   /*
+    * 取消当前正在跑的 AI 或绘图任务。
+    *
+    * <p>取消后这条 HTTP 连接会断开，工具循环在下一轮入口处退出，
+    * 本轮暂存的文件改动<b>不写回</b>项目 —— 用户明确不要这个结果了。
+    * 界面上 busy 会在 finally 里复位，可以立刻发下一条。
+    *
+    * <p>要说一句「改动不会写回」，否则用户以为取消只是停下来，
+    * 回头发现文件没动，还以为助手又骗了他。
+    */
+   case "cancel":{
+    boolean hadAi=active!=null;
+    art.cancel();
+    if(active!=null)active.cancel();
+    if(hadAi)toast("已取消；本轮还没写回的改动不会保存");
+   }break;
    /* 在手机本地运行项目，用内置浏览器看效果 */ case "localRun":
    android.util.Log.i("NeoLocalRun","begin id="+p.optString("id"));
    try{

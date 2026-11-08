@@ -245,6 +245,22 @@ final class SelfTest {
    .put(new JSONObject().put("text","第二步").put("done",false)));
   check(DevAgent.planContext(a,planId).contains("接着做没勾的那几项"),
    "an unfinished plan tells the model to keep going");
+  /*
+   * 技能名要能带版本号，但不能带路径。
+   *
+   * <p>原来的正则把点号一起禁了，「清洗流程 v1.0」这种最自然的命名写不进去；
+   * 而真正要防的只是路径穿越。
+   */
+  String skillName="自测技能 v1.0";
+  a.skills.write(skillName,"自测用，写完就删","内容");
+  check(a.skills.read(skillName).has("content"),
+   "a skill name with a version dot is accepted");
+  a.skills.delete(skillName);
+  boolean pathSkillRejected=false;
+  try{a.skills.write("../逃出去","不该允许","x");}
+  catch(Exception e){pathSkillRejected=true;}
+  check(pathSkillRejected,
+   "a skill name with a path traversal is still refused");
   check(a.memory.usageFor(muScope).indexOf("记忆用量")<0
     ||!a.memory.usageFor(muScope).contains("本项目"),
    "clearing the test scope removes it from the usage line");

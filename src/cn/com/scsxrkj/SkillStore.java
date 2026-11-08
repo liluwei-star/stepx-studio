@@ -57,7 +57,20 @@ final class SkillStore {
   String name=raw==null?"":raw.trim();
   if(name.isEmpty())throw new Exception("技能名不能为空");
   if(name.length()>NAME_CAP)throw new Exception("技能名超过 "+NAME_CAP+" 字符");
-  if(!name.matches("[\\p{L}\\p{N}_-][\\p{L}\\p{N} _-]*"))throw new Exception("技能名只能用中英文、数字、空格、下划线、短横线，且不能以符号开头："+name);
+  /*
+   * 名字要能带点号，但不能带路径。
+   *
+   * <p>原来的正则把 {@code .} 一起禁掉了 —— 安全是安全了，可
+   * 「清洗流程 v1.0」「部署 v2.3」这种最自然的命名直接写不进去，
+   * 模型会以为写技能坏了，换个名字再试，白折腾。
+   *
+   * <p>真正要防的是路径穿越：{@code ..} 和路径分隔符。
+   * 这两个拦住之后，点号本身没有任何危险。
+   */
+  if(name.contains("/")||name.contains("\\")||name.contains(".."))
+   throw new Exception("技能名不能包含路径符号（/ \\ 或 ..）："+name);
+  if(!name.matches("[\\p{L}\\p{N}_\\-.][\\p{L}\\p{N} _.\\-]*"))
+   throw new Exception("技能名只能用中英文、数字、空格、下划线、短横线、句点，且不能以符号开头："+name);
   return name;
  }
 
