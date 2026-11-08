@@ -228,8 +228,23 @@ for attempt in 1 2 3 4 5; do
   sleep 10
 done
 if [ "$push_ok" != "1" ]; then
-  echo "  ✗ 推送连续失败。版本号已改并编译完成，可稍后手动 git push。" >&2
-  exit 1
+  # ── 兜底：走 GitHub Git Data API 推送 ──────────────────────
+  #
+  # git push 在这条网络上经常连不上（Recv failure: Connection was reset），
+  # 但 gh api 是通的。走 API 上传也能得到完全一样的仓库内容。
+  #
+  # 关键坑：<b>要传仓库里的 blob 字节，不是工作区文件字节。</b>
+  # 工作区被 autocrlf 改成 CRLF，blob SHA 与远端对不上，文件会一直显示「已修改」。
+  # 所以每个文件用 `git cat-file blob <sha>` 取原始内容。
+  echo "  git push 不通，改走 GitHub Git Data API 推送..."
+  if python3 "$REPO/tools/push-via-api.py" "$GH_REPO" "main"; then
+    push_ok=1
+    echo "  已通过 API 推送到 main"
+  else
+    echo "  ✗ 推送连续失败（git 与 API 两条路都不通）。" >&2
+    echo "    版本号已改并编译完成，可稍后手动 git push。" >&2
+    exit 1
+  fi
 fi
 echo "  已推送到 main"
 
