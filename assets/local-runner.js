@@ -179,5 +179,15 @@
  if(text['vite.config.ts']||text['vite.config.js'])warnings.add('未执行 Vite 插件；原生桥接与后端需独立验证');
  doc.querySelectorAll('meta[http-equiv="Content-Security-Policy"]').forEach(n=>n.remove());
  output['index.html']=enc('<!doctype html>\n'+doc.documentElement.outerHTML);
- window.__neoBuild={files:output,note:[count?'JS/TSX 已编译':'静态网页',...warnings].join(' · '),libraries:[...used],patches:patchNotes};
+ /*
+ * 把警告单独列出来，不只是混在 note 里。
+ *
+ * <p>原来 warnings 只拼进 note 字符串（用 · 分隔），调用方分不清
+ * 哪句是「编译成功」、哪句是「这里有问题」。
+ * 模型拿到的 note 是「JS/TSX 已编译 · 源码适配失败：src/x.ts」，
+ * 它会当成正常信息，直接交付一份功能残缺的项目。
+ *
+ * <p>现在 warnings 单列一个数组，调用方能逐条判断严重程度。
+ */
+ window.__neoBuild={files:output,note:[count?'JS/TSX 已编译':'静态网页',...warnings].join(' · '),warnings:[...warnings],libraries:[...used],patches:patchNotes};
 })().catch(e=>{window.__neoBuild={error:e.errors?e.errors.map(x=>(x.location?.file||'')+':'+(x.location?.line||'')+' '+x.text).join('\n'):String(e.message||e)}});

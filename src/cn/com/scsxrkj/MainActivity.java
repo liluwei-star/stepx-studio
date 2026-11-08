@@ -48,6 +48,13 @@ import java.util.zip.*;
  static final long MAX_IMPORT_FILE = 100L * 1024 * 1024;
  /** 导入时解压后的总量上限（200 MB）。防压缩炸弹。 */
  static final long MAX_IMPORT_TOTAL = 200L * 1024 * 1024;
+ /**
+  * 单次 AI 改动允许留在对话历史里的最大字符数（512 KB）。
+  *
+  * <p>改动内容要交给「审查并应用」用，所以不能一刀切丢掉；但整个项目重写
+  * 时改动本身就是几 MB，再塞进对话历史会让 workspace.json 迅速膨胀。
+  */
+ static final int MAX_EDIT_FILES_CHARS = 512 * 1024;
  ArtManager art;LocalRunner localRunner;CloudProjects cloud;Button aiLinkButton;StudioUsage studioUsage;AppUpdater updater;AutoLink link;LinearLayout linkBar;TextView linkStatus;
  LinearLayout root,header,tabs;FrameLayout content;WebView studio,desk;TextView title;ProgressBar progress;Button focusExit;
  boolean local=true,focus=false,desktop=false,debug;int zoom=100;String currentTab="projects";
@@ -634,10 +641,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
       m.put("toolCalls",brief);
       cleaned=true;
      }
-     /* ③-2 edit.base / edit.files：整个项目文件表，一个项目就是几 MB */
+     /*
+      * ③-2 edit.base 是整个项目文件表（几 MB），进对话历史会把 workspace 撑爆；
+      *     edit.files 是这次改了什么，审查要用 —— 保留，超大才丢。
+      */
      JSONObject ed=m.optJSONObject("edit");
      if(ed!=null&&(ed.has("base")||ed.has("files"))){
-      m.put("edit",editSummary(ed));
+      m.put("edit",editForStore(ed));
       cleaned=true;
      }
     }
@@ -851,10 +861,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
       m.put("toolCalls",brief);
       m.put("toolCallsBrief",true);
      }
-     /* edit.base / edit.files 是整个项目文件表，一个就几 MB —— 不给前端 */
+     /*
+      * edit.base 是整个项目文件表（几 MB），不给前端；
+      * edit.files 是这次改了什么，审查要用 —— 必须留着。
+      */
      JSONObject ed=sm.optJSONObject("edit");
      if(ed!=null&&(ed.has("base")||ed.has("files"))){
-      m.put("edit",editSummary(ed));
+      m.put("edit",editForUi(ed));
       m.put("editBrief",true);
      }
      msgs.put(m);
@@ -901,7 +914,51 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   * <p>对话历史要回答的是「当时改了什么、什么状态」，不是「每个文件的完整内容」。
   * 所以只留：改了哪些文件、状态、以及基线的哈希。
   */
- JSONObject editSummary(JSONObject edit)throws Exception{
+
+ /**
+  * 给前端看的 edit：保留改动内容，去掉大件基线。
+  *
+  * <p><b>这里曾经埋着一个很难查的 BUG：</b>前端「审查并应用」按钮读的是
+  * {@code edit.base} 和 {@code edit.files}，而 publicState 把这两个字段
+  * 一并换成了 changedFiles/baseHash。结果：
+  * <ul>
+  *   <li>AI 刚回复完时，S 是从 Neo.read() 读的完整 state —— 按钮能点开；</li>
+  *   <li>但任何一次 sendState 之后，S 被换成 publicState 的瘦身版 ——
+  *       edit.files 没了，审查页就是空的。</li>
+  * </ul>
+  * 于是这个功能<b>时好时坏</b>：刚回复完能审，滑动一下或者切个页面就审不了了。
+  *
+  * <p><b>修法：</b>审查真正需要的是「这次改了什么」，也就是 {@code edit.files}
+  * —— 它只含被改动的文件，体积可控。而 {@code edit.base} 是改之前的整个项目
+  * （几 MB），前端可以自己从当前项目取基线，不需要在这里带。
+  *
+  * <p>所以：files 留着，base 去掉。
+  */
+ JSONObject editForUi(JSONObject edit)throws Exception{
+  if(edit==null)return null;
+  JSONObject out=new JSONObject();
+  for(java.util.Iterator<String> it=edit.keys();it.hasNext();){
+   String k=it.next();
+   if("base".equals(k))continue;
+   out.put(k,edit.opt(k));
+  }
+  return out;
+ }
+
+ /**
+  * 存进对话历史时的 edit：去掉大件基线，保留改动内容，但有体积上限。
+  *
+  * <p>edit.base 是「改动之前的整个项目」，一个项目就几 MB —— 放进对话历史
+  * 会把 workspace.json 撑大几十倍，是启动 OOM 的元凶之一，必须去掉。
+  *
+  * <p>edit.files 是「这次改了什么」，审查页面要用它。正常改动就几个文件，
+  * 几百字节到几十 KB，留在历史里没问题。但如果是「整个项目重写」，
+  * files 本身也会很大 —— 这时用 changedFiles 兜底，并标出 filesOmitted，
+  * 前端据此提示用户「改动太大，请让 AI 分批改」。
+  *
+  * <p>上限取 512 KB：超过就说明这不是一次普通改动。
+  */
+ JSONObject editForStore(JSONObject edit)throws Exception{
   if(edit==null)return null;
   JSONObject out=new JSONObject();
   for(java.util.Iterator<String> it=edit.keys();it.hasNext();){
@@ -912,8 +969,19 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   JSONObject files=edit.optJSONObject("files");
   if(files!=null){
    JSONArray names=new JSONArray();
-   for(java.util.Iterator<String> it=files.keys();it.hasNext();)names.put(it.next());
+   int size=0;
+   for(java.util.Iterator<String> it=files.keys();it.hasNext();){
+    String n=it.next();
+    names.put(n);
+    size+=n.length()+files.optString(n,"").length();
+   }
    out.put("changedFiles",names);
+   if(size<=MAX_EDIT_FILES_CHARS){
+    out.put("files",files);
+   }else{
+    out.put("filesOmitted",true);
+    out.put("filesSize",size);
+   }
   }
   JSONObject base=edit.optJSONObject("base");
   if(base!=null)out.put("baseHash",Integer.toHexString(base.toString().hashCode()));
@@ -1386,6 +1454,19 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    +" projectId="+params.optString("projectId","")
    +" messagesLen="+messages.toString().length()
    +" limit="+ModelLimits.transportChars(profile.optString("endpoint"),profile.optString("model")));
+  /*
+   * 这轮服务端支不支持原生 function calling。
+   *
+   * <p>提示词里「怎么调工具」的措辞必须跟实际协议一致：
+   * 原生路径说「直接调工具」，降级路径说「把工具请求写成 JSON」。
+   * 两套混着说，模型会挑错那条路 —— 在原生路径下返回 files JSON，
+   * 改动没有暂存区、没有校验，最后往往丢在抠 JSON 那一步。
+   *
+   * <p>这里的初值按「上次试出来的」算（服务端明确报过不支持才记下来）。
+   * 万一这次其实不支持，DevAgent 会在收到 400 后当场降级并补说明 ——
+   * 那时虽然措辞已经发出去了，但至少行为是对的。
+   */
+  final boolean nativeTools=!isNoNativeTools(profile.optString("id",""));
   if(params.optBoolean("projectContext")||!editMode.isEmpty()){
    if(building)throw new Exception("请等待构建结束后再修改项目");
    JSONObject target=byId("projects",params.getString("projectId"));editBase=new JSONObject(target.getJSONObject("files").toString());
@@ -1441,8 +1522,40 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     +" artAssets="+target.optString("artAssets","[]").length()
     +" messages="+messages.toString().length());
    if(context.length()>limitChars)throw new Exception("项目内容超过本机传输限制，请分批处理（"+context.length()+" / "+limitChars+" 字符）");
+   /*
+    * 历史对话也要一起算进传输量。
+    *
+    * <p>原来只查了项目上下文（context），历史消息（messages）完全没查 ——
+    * 对话越长、工具轮次越多，messages 越涨，最后撞上服务端上限：
+    * 要么被拒（用户看到一句看不懂的 400），要么被悄悄截断
+    * （模型看到的上下文是断的，会给出莫名其妙的回答）。
+    *
+    * <p>两段加起来才是这次请求真正的体量。
+    */
+   int msgChars=messages.toString().length();
+   if(msgChars+context.length()>limitChars)
+    throw new Exception("这次对话的内容太多（历史 "+msgChars+" + 项目上下文 "+context.length()
+     +" = "+(msgChars+context.length())+" 字符，限 "+limitChars+"）。"
+     +"请新开一个对话，或把历史里的大段内容删掉一些再试。");
    messages=new JSONArray(messages.toString());messages.put(new JSONObject().put("role","user").put("content",context));
-   if(!editMode.isEmpty()){if(!Arrays.asList("auto","review").contains(editMode))throw new Exception("无效写入模式");params.put("system",target.optBoolean("cloudSource")?ProjectEdits.sourceInstructions():ProjectEdits.instructions());}
+   if(!editMode.isEmpty()){if(!Arrays.asList("auto","review").contains(editMode))throw new Exception("无效写入模式");params.put("system",target.optBoolean("cloudSource")?ProjectEdits.sourceInstructions(nativeTools):ProjectEdits.instructions(nativeTools));}
+  }
+  /*
+   * 全局传输量检查 —— 不管有没有项目上下文都要查。
+   *
+   * <p>上面那段检查只在「带项目上下文」时跑，纯问答完全不查。
+   * 而纯问答恰恰是最容易撑爆的：对话历史一轮轮往上叠，
+   * 加上每轮工具结果（read_file 读回的文件全文），几十轮就能到几 MB。
+   *
+   * <p>超了有两种后果：服务端直接拒（用户只看到一句 400），
+   * 或者服务端悄悄截断（模型看到的上下文是断的，答案莫名其妙）。
+   * 两种都不好，所以在这里明确拦下来，并告诉用户怎么办。
+   */
+  {
+   int limit=ModelLimits.transportChars(profile.optString("endpoint"),profile.optString("model"));
+   int body=messages.toString().length();
+   if(body>limit)throw new Exception("这次对话的内容太多（"+body+" 字符，限 "+limit+"）。"
+    +"请新开一个对话，或删掉历史里的大段内容再试。");
   }
   final JSONObject baseline=editBase;final JSONArray request=messages;
   ApiClient client=onDevice?new LocalAiClient(this):new ApiClient();active=client;long started=System.currentTimeMillis();String chat=params.getString("chatId"),rid=UUID.randomUUID().toString(),projectId=params.optString("projectId",""),taskId=params.optString("taskId","");synchronized(this){state.put("pendingAi",new JSONObject().put("id",rid).put("time",started).put("chatId",chat).put("projectId",projectId).put("source",Usage.source(profile)).put("provider",profile.optString("name")).put("model",profile.optString("model")));try{saveState();}catch(Exception e){state.remove("pendingAi");active=null;throw e;}}event("busy",true);
@@ -1475,19 +1588,110 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    if(result!=null&&research!=null){JSONObject brief=new JSONObject(research.toString());JSONArray rs=brief.getJSONArray("references");for(int ri=0;ri<rs.length();ri++){rs.getJSONObject(ri).remove("code");rs.getJSONObject(ri).remove("licenseText");}result.put("research",brief);}
    if(result!=null&&baseline!=null&&!editMode.isEmpty()){
     JSONObject edit=new JSONObject().put("projectId",projectId).put("mode",editMode).put("status","rejected");
-    try{if(client.cancelled||result.optBoolean("incomplete"))throw new Exception("请求已取消或输出截断，没有写入文件");JSONObject changes=ProjectEdits.parse(result.optString("text"));JSONObject target=byId("projects",projectId);JSONObject updated=ProjectEdits.apply(target,baseline,changes,"AI 助手");if(research!=null){JSONArray refs=new JSONArray(research.getJSONArray("references").toString());for(int ri=0;ri<refs.length();ri++){refs.getJSONObject(ri).remove("code");refs.getJSONObject(ri).remove("licenseText");}updated.put("sourceReferences",refs);}
+    try{/*
+      * 「取消」和「到达轮数上限」要分开处理。
+      *
+      * <p>原来两者一起拒掉：只要 incomplete 就抛异常，改动一律不写回。
+      * incomplete 有两个来源 —— 用户中途取消，以及跑满了 40 轮工具循环。
+      *
+      * <p>用户取消时确实该丢掉（他不想这个结果了）。但<b>跑满轮数时丢掉就太亏了</b>：
+      * 一个要改十几个文件的任务，前面 39 轮读文件、改文件、编译都真做了，
+      * 第 40 轮被上限截住 —— 结果一个字都没落盘，用户白等几分钟。
+      *
+      * <p>所以：只有用户明确取消才丢弃。跑满轮数照常写回，
+      * 同时在提示里说清「这轮没做完，可以再发一条接着做」。
+      */
+     if(shouldRejectWrite(client.cancelled,result.optBoolean("incomplete")))throw new Exception("已取消，没有写入文件");
+     if(result.optBoolean("incomplete")){
+      edit.put("partial",true);
+      edit.put("partialNote","本轮工具调用达到了轮数上限，已做的改动仍然写回，但这一轮没做完。");
+     }/*
+     * 改动来源有两条，取先有的那条：
+     *
+     * ① stagedFiles —— 工具路径（原生 function calling）实际改动过的文件。
+     *    原生路径下模型把文件内容放在 tool_calls 里，最终文本是人话回答，
+     *    里面没有 files JSON。从文本里抠必然失败，模型改对了也等于没改。
+     *
+     * ② 文本里的 files JSON —— 降级路径（模型不支持 tools）才走这条。
+     */
+     JSONObject changes=result.optJSONObject("stagedFiles");
+     if(changes==null||changes.length()==0){
+      try{changes=ProjectEdits.parse(result.optString("text"));}
+      catch(Exception parseError){
+       JSONObject staged=result.optJSONObject("stagedFiles");
+       if(staged!=null){
+        changes=staged;
+       }else{
+        /*
+         * 模型这一轮根本没改文件 —— 这<b>不是错误</b>。
+         *
+         * <p>原来这里直接抛「模型没有交回可写入的文件改动」，
+         * 于是用户在项目里问一句「这个项目有多少个文件」，
+         * 模型正常回答了，屏幕上却多出一条红色报错 ——
+         * 因为纯问答本来就不会有文件改动。
+         *
+         * <p>只有一种情况算真出错：模型调了改文件的工具，但一个文件都没改动成功。
+         * 那时候改动为空，下面会照常处理成「本轮没有改动」，同时工具的报错
+         * 已经在对话里给用户看过了 —— 不用再叠一条吓人的红字。
+         */
+        changes=new JSONObject();
+       }
+      }
+     }JSONObject target=byId("projects",projectId);JSONObject updated=ProjectEdits.apply(target,baseline,changes,"AI 助手");if(research!=null){JSONArray refs=new JSONArray(research.getJSONArray("references").toString());for(int ri=0;ri<refs.length();ri++){refs.getJSONObject(ri).remove("code");refs.getJSONObject(ri).remove("licenseText");}updated.put("sourceReferences",refs);}
      if(editMode.equals("auto")){replaceProject(updated);edit.put("status",ProjectEdits.same(baseline,updated.getJSONObject("files"))?"unchanged":"applied");}
      else edit.put("status","review");
-     edit.put("files",changes).put("base",baseline).put("message",editMode.equals("auto")?"已保存到指定项目；可预览或构建 APK":"建议已生成，等待审查应用");
+     edit.put("files",changes).put("base",baseline).put("message",
+      edit.get("status")!=null&&"unchanged".equals(edit.optString("status"))
+       ?"这一轮没有改动文件。"
+       :(editMode.equals("auto")?"已保存到指定项目；可预览或构建 APK":"建议已生成，等待审查应用"));
     }catch(Exception ex){edit.put("message",safeError(ex));}
     result.put("edit",edit);
-   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",editSummary(result.optJSONObject("edit"))).put("toolCalls",toolCallSummary(result.optJSONArray("toolCalls"))).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",result.optString("text")).put("editBaseHash",baseline==null?"":Integer.toHexString(baseline.toString().hashCode())).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){
+   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",editForStore(result.optJSONObject("edit"))).put("toolCalls",toolCallSummary(result.optJSONArray("toolCalls"))).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",result.optString("text")).put("editBaseHash",baseline==null?"":Integer.toHexString(baseline.toString().hashCode())).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){
     // 回滚：撤掉刚追加的 usage 条目（只多不多）
     try{JSONArray u=state.getJSONArray("usage");while(u.length()>usageBefore)u.remove(u.length()-1);}catch(Exception ignored){}
     throw commitError;
    }}
-   if(result!=null){result.put("chatId",chat).put("requestId",rid);event("reply",result);}else event("error",err);
-  }catch(Exception e){event("error","结果记录失败，请导出当前对话保留内容");}finally{liveEdit=null;event("aiLive",new JSONObject());active=null;event("busy",false);sendState();JSONObject completed=result;String failure=err;runOnUiThread(()->{if(link!=null)link.aiFinished(chat,completed,failure);try{if(completed!=null&&completed.optJSONObject("edit")!=null&&completed.getJSONObject("edit").optString("status").equals("applied")){JSONArray calls=completed.optJSONArray("toolCalls");boolean image=false;if(calls!=null)for(int i=0;i<calls.length();i++)if(calls.getJSONObject(i).optString("name").equals("generate_image")&&calls.getJSONObject(i).has("result"))image=true;if(image){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(this,byId("projects",projectId));localRunner.start();}}}catch(Exception ignored){event("artStatus","图片和代码已保存；可在项目中打开本地预览");}});}});
+   if(result!=null){
+     /*
+      * 推给 WebView 的 result 也要瘦身：result.edit 里带着改动前的整个项目
+      * （几 MB），每回一次 AI 就往 WebView 灌几 MB 字符串 —— 又一次 OOM。
+      * 前端只需要「改了哪些文件、改成什么样」，不需要旧基线。
+      */
+     result.put("chatId",chat).put("requestId",rid);
+     JSONObject editOut=result.optJSONObject("edit");
+     if(editOut!=null)result.put("edit",editForStore(editOut));
+     /*
+      * 工具调用记录也要瘦身。
+      *
+      * <p><b>这里漏掉过一次，是 OOM 的同一条路径：</b>DevAgent 返回的
+      * toolCalls 里存着工具的<b>完整结果</b> —— read_file 读回来的整个文件
+      * 就在里面。edit 瘦身了、toolCalls 没瘦身，结果每次 AI 回复都往
+      * WebView 灌几 MB 字符串。
+      *
+      * <p>前端只用它渲染一个可折叠的 JSON 列表（app.js 里
+      * {@code JSON.stringify(m.toolCalls,null,2)}），根本不读内容 ——
+      * 只留「调了什么、成没成、结果多长、报了什么错」就够了。
+      */
+     /*
+      * 「这轮画了图」的判断要在瘦身<b>之前</b>做。
+      *
+      * <p>因为摘要把 result 换成了 resultBytes —— 后面再想看
+      * generate_image 返回了什么，就什么都看不到了。而「画了图」
+      * 决定要不要自动打开预览，这个判断不能丢。
+      *
+      * <p>所以先算出结论，用一个布尔字段带过去。
+      */
+     JSONArray rawCalls=result.optJSONArray("toolCalls");
+     boolean drewImage=false;
+     if(rawCalls!=null)for(int i=0;i<rawCalls.length();i++){
+      JSONObject c=rawCalls.optJSONObject(i);
+      if(c!=null&&"generate_image".equals(c.optString("name"))&&c.has("result")){drewImage=true;break;}
+     }
+     result.put("drewImage",drewImage);
+     result.put("toolCalls",toolCallSummary(rawCalls));
+     event("reply",result);
+    }else event("error",err);
+  }catch(Exception e){event("error","结果记录失败，请导出当前对话保留内容");}finally{liveEdit=null;event("aiLive",new JSONObject());active=null;event("busy",false);sendState();JSONObject completed=result;String failure=err;runOnUiThread(()->{if(link!=null)link.aiFinished(chat,completed,failure);try{if(completed!=null&&completed.optJSONObject("edit")!=null&&completed.getJSONObject("edit").optString("status").equals("applied")){boolean image=completed.optBoolean("drewImage",false);if(image){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(this,byId("projects",projectId));localRunner.start();}}}catch(Exception ignored){event("artStatus","图片和代码已保存；可在项目中打开本地预览");}});}});
  }
 
 
@@ -2445,6 +2649,27 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    }
    if(n>0)android.util.Log.i("NeoCloudFiles","清理无人引用的大文件 "+n+" 个");
   }catch(Exception ignored){}
+ }
+
+ /**
+  * 这一轮的结果该不该被丢掉。
+  *
+  * <p><b>为什么只认「取消」：</b>原来这里是 {@code cancelled || incomplete} ——
+  * 两者一起丢。但 incomplete 有两个来源：用户中途取消，和跑满了 40 轮工具循环。
+  *
+  * <p>用户取消时丢掉是对的（他不要这个结果了）。但<b>跑满轮数时丢掉就太亏了</b>：
+  * 一个要改十几个文件的任务，前面 39 轮读文件、改文件、编译都真做了，
+  * 第 40 轮被上限截住，结果一个字都没落盘 —— 用户白等几分钟。
+  *
+  * <p>所以：只有用户明确取消才丢弃。跑满轮数照常写回，
+  * 同时在提示里说清「这轮没做完，可以再发一条接着做」。
+  *
+  * @param cancelled  用户是否中途取消
+  * @param incomplete 是否因轮数上限或输出截断而没做完
+  * @return true 表示丢弃本轮改动
+  */
+ static boolean shouldRejectWrite(boolean cancelled,boolean incomplete){
+  return cancelled;
  }
 
  /** 目标路径是否可用：合法、没被占用、不是保留的入口文件。 */

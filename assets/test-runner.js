@@ -142,9 +142,21 @@
  const matched=allPaths.filter(n=>TEST_RE.test(n)&&!SKIP_RE.test(n)).sort();
  const testFiles=matched.slice(0,TEST_FILE_CAP);
  if(!testFiles.length){
+  /*
+   * 没有测试文件时 ok 必须是 false。
+   *
+   * <p>原来这里写的是 ok:true —— 理由大概是「没失败就是成功」。
+   * 但模型看到 ok:true 就会说「测试通过了」，而实际上一个用例都没跑。
+   * 这是<b>假阳性</b>：比明确报错更糟，因为它让人以为验证过了。
+   *
+   * <p>所以 ok=false，同时用 ran:false 明确说清「是没得跑，不是跑挂了」，
+   * 让模型能分清「项目里没有测试」和「测试失败」这两种完全不同的情况。
+   */
   window.__neoTest={
-   ok:true,files:0,passed:0,failed:0,skipped:0,durationMs:Date.now()-started,
-   note:'项目里没有测试文件。测试文件按 *.test.ts / *.test.js / *.spec.ts 命名，放在源码旁边即可',
+   ok:false,ran:false,files:0,passed:0,failed:0,skipped:0,durationMs:Date.now()-started,
+   note:'项目里没有测试文件，所以没有任何用例被执行 —— 这不等于测试通过。'
+    +'测试文件按 *.test.ts / *.test.js / *.spec.ts 命名，放在源码旁边即可。'
+    +'如果要验证这次改动，就自己写一个测试文件，或者改用 run_script 直接验算。',
    suites:[],errors:[],
   };
   return;
@@ -261,6 +273,7 @@
  }
  window.__neoTest={
   ok:failed===0&&errors.length===0,
+  ran:true,
   files:testFiles.length,
   filesList:testFiles,
   matched:matched.length,

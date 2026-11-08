@@ -4,7 +4,18 @@ const runtime=fs.readFileSync('assets/studio-runtime.js','utf8');
 const root='/home/ide/state/h1/projects/-home-ide-workspace';
 const row=(id,i,o,r=0,w=0)=>({type:'assistant',timestamp:'2026-10-18T06:00:00Z',message:{id,model:'step-5-preview',usage:{input_tokens:i,output_tokens:o,cache_read_input_tokens:r,cache_creation_input_tokens:w}}});
 const content=[row('a',100,5,20),row('a',100,10,20),row('a',100,7,20),row('b',10,4,5),row('bad',-1,3),{type:'user',message:{content:'input_tokens 999999'}}].map(JSON.stringify).join('\n');
-let output='';const mock={lstatSync:p=>({isSymbolicLink:()=>false,isDirectory:()=>p===root,isFile:()=>p!==root,size:content.length}),readdirSync:p=>{assert.equal(p,root);return ['one.jsonl']},readFileSync:p=>{assert.equal(p,root+'/one.jsonl');return content}};
+let output='';/*
+ * mock 的路径断言不能写死正斜杠。
+ *
+ * <p>scanner 用 path.join(dir,name) 拼路径。在 Linux（StepX 沙箱）上是正斜杠，
+ * 在 Windows 上跑测试时变成反斜杠 —— 断言失败抛错，被 scanner 的 catch
+ * 吞掉，结果 status 变成 'error'、rows 变 0，测试报的是「0 !== 4」，
+ * 完全看不出是路径分隔符的问题。
+ *
+ * <p>所以这里把两种分隔符都归一化再比。
+ */
+const norm=p=>p.replace(/\\/g,'/');
+const mock={lstatSync:p=>({isSymbolicLink:()=>false,isDirectory:()=>norm(p)===root,isFile:()=>norm(p)!==root,size:content.length}),readdirSync:p=>{assert.equal(norm(p),root);return ['one.jsonl']},readFileSync:p=>{assert.equal(norm(p),root+'/one.jsonl');return content}};
 vm.runInNewContext(scanner,{require:n=>n==='fs'?mock:path,console:{log:s=>output=s},Date,Map,Error});
 const raw=JSON.parse(output.slice('NEO_STUDIO_USAGE_V1='.length));assert.equal(raw.rows,4);assert.equal(raw.skipped,1);assert.equal(raw.groups[0].requests,2);assert.equal(raw.groups[0].input,110);assert.equal(raw.groups[0].output,14);assert.equal(raw.groups[0].cacheRead,25);
 const ctx=vm.createContext({Date,Map,Set,AbortController,setTimeout,clearTimeout,location:{},fetch:null});vm.runInContext(runtime,ctx);

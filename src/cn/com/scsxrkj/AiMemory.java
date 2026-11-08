@@ -177,6 +177,36 @@ final class AiMemory {
   * <p>没有记忆时返回空串 —— 不要在提示词里留一个空的「记忆：无」标题，
    * 那会让模型以为这里本来就该有内容，从而倾向于凭空编点东西填上。
   */
+ /**
+  * 记忆用量的一行说明，拼进系统提示词。
+  *
+  * <p><b>为什么必须有：</b>提示词里写着「每轮提示词末尾会告诉你用量」，
+  * 可实际上从来没注入过 —— 模型根本不知道还剩多少空间。
+  * 于是它只能照常 remember，撞到上限拿到「超过上限，请再精简」，
+  * 再猜着删一点、再试一次，来回好几轮才存进去。
+  *
+  * <p>给出具体数字之后，模型能在快满的时候主动用 update_memory 整理，
+  * 而不是被动挨报错。
+  *
+  * @param projectId 当前项目；没选项目时传 null 或空串
+  * @return 一行用量说明；两个范围都为空时返回空串
+  */
+ String usageFor(String projectId){
+  int g=used("global",null);
+  int p=projectId==null||projectId.trim().isEmpty()?-1:used("project",projectId);
+  if(g==0&&(p<=0))return "";
+  StringBuilder sb=new StringBuilder();
+  sb.append("\n\n【记忆用量】");
+  sb.append("全局 ").append(g).append("/").append(GLOBAL_CAP);
+  if(g*10>=GLOBAL_CAP*7)sb.append("（快满了，用 update_memory 整理压缩一轮）");
+  if(p>0){
+   sb.append("；本项目 ").append(p).append("/").append(PROJECT_CAP);
+   if(p*10>=PROJECT_CAP*7)sb.append("（快满了，用 update_memory 整理压缩一轮）");
+  }
+  sb.append("。写之前先看这个数，别撞上限才发现放不下。");
+  return sb.toString();
+ }
+
  String contextFor(String projectId){
   StringBuilder sb=new StringBuilder();
   String global=read("global",null).trim();

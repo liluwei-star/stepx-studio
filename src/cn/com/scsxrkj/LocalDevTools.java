@@ -13,7 +13,115 @@ import java.util.concurrent.*;
 final class LocalDevTools {
  final MainActivity a;final JSONObject original;JSONObject staged;final JSONArray calls=new JSONArray();int artCalls;
  LocalDevTools(MainActivity a,JSONObject project)throws Exception{this.a=a;original=project==null?null:new JSONObject(project.toString());staged=project==null?null:new JSONObject(project.toString());}
- static String instructions(boolean project){
+ /**
+ * 拼工具说明与行为准则。
+ *
+ * @param project  本轮有没有目标项目
+ * @param nativeTools 服务端支持原生 function calling 吗
+ *
+ * <p><b>为什么要分原生/降级两种措辞：</b>提示词里原本写死了
+ * 「需要工具时返回 JSON 对象」「结束时返回严格 JSON files 对象」。
+ * 那是<b>降级路径</b>的协议 —— 服务端不支持 tools 时，
+ * 模型只能把工具请求写进正文。
+ *
+ * <p>但在原生路径下模型是<b>看不到</b>这个 JSON 协议的：
+ * 它直接调用 tools 参数。这两套说法同时出现在提示词里，
+ * 模型会犯迷糊：既然要用 JSON 写在正文里，那我干脆不调工具了 ——
+ * 于是原生 function calling 明明挂着，却一次都不被触发。
+ * 这就是「明明是原生路径，行为却像降级路径」的由来。
+ *
+ * <p>所以措辞必须跟着实际路径走：原生路径只讲「直接调工具」，
+ * 降级路径才讲「把工具请求写成 JSON」。
+ */
+  /**
+  * 说明「怎么调工具」—— 这句话必须跟着实际协议走。
+  *
+  * <p>原生 function calling：模型直接调 tools 参数，不该看到任何 JSON 协议的说法。
+  * <p>降级：服务端不支持 tools，只能把工具请求写进正文，格式必须是 JSON。
+  */
+ private static String callProtocol(boolean nativeTools){
+  if(nativeTools)return "需要工具就直接调用对应的工具（一次可以调多个）。"
+   +"不要把工具请求写成 JSON 放进正文 —— 系统认的是你直接发起的工具调用。";
+  return "需要工具时只返回 JSON：{\"tools\":[{\"name\":\"工具名\",\"args\":{...}}]}。"
+   +"允许在 JSON 前面先用一两句话说明你要做什么，但不要夹带大段解释。";
+ }
+
+ /**
+  * 当前项目的概览，直接拼进系统提示词。
+  *
+  * <p><b>为什么必须在提示词里：</b>提示词教模型「用户问『你能看到这个项目吗』，
+  * 第一句就该是『能，有 318 个文件，是 Vite + React』」——
+  * 可模型<b>根本不知道</b>项目有 318 个文件。
+  *
+  * <p>于是只剩两条路：先调 list_files（违背「先回答问题」的要求，
+  * 用户等一轮才看到第一句话），或者<b>编一个数字出来</b>。
+  * 后者更糟 —— 那是在骗用户。
+  *
+  * <p>所以项目概览要像记忆、技能清单一样，<b>每轮自动带上</b>。
+  * 代价是几十个字，换来的是模型第一句就能如实回答。
+  *
+  * @param project 当前项目；null 表示这轮没选项目
+  * @return 概览文本；没有项目时返回空串
+  */
+ static String overview(JSONObject project){
+  if(project==null)return "";
+  JSONObject files=project.optJSONObject("files");
+  if(files==null)return "";
+  int count=files.length();
+  if(count==0)return "\n\n【当前项目】项目是空的，还没有文件。";
+  /*
+   * 顶层目录分布：模型要知道「这是个单页应用」还是「这是个多模块工程」，
+   * 得先看出文件的形状。这里只统计顶层，不递归 —— 递归太占地方。
+   */
+  java.util.TreeMap<String,Integer> top=new java.util.TreeMap<>();
+  for(Iterator<String> it=files.keys();it.hasNext();){
+   String n=it.next();
+   int slash=n.indexOf('/');
+   String k=slash<0?"（根目录）":n.substring(0,slash);
+   Integer c=top.get(k);
+   top.put(k,c==null?1:c+1);
+  }
+  StringBuilder dirs=new StringBuilder();
+  int shown=0;
+  for(java.util.Map.Entry<String,Integer> e:top.entrySet()){
+   if(shown++>=8)break;
+   if(dirs.length()>0)dirs.append("、");
+   dirs.append(e.getKey()).append(' ').append(e.getValue()).append(" 个");
+  }
+  if(top.size()>8)dirs.append(" 等 ").append(top.size()).append(" 个顶层目录");
+  StringBuilder sb=new StringBuilder();
+  sb.append("\n\n【当前项目】").append(project.optString("name","未命名")).append("，共 ").append(count).append(" 个文件。");
+  sb.append("\n顶层分布：").append(dirs).append("。");
+  if(files.has("index.html"))sb.append("\n入口：index.html");
+  else if(files.has("src/main.tsx")||files.has("src/App.tsx"))sb.append("\n入口：src 下的 React 应用");
+  else if(files.has("src/main.ts")||files.has("src/main.js"))sb.append("\n入口：src 下的模块入口");
+  String pkg=files.optString("package.json","");
+  if(!pkg.isEmpty()){
+   // 只挑依赖名 —— 完整 package.json 可能几百行，塞进提示词太占地方
+   java.util.ArrayList<String> deps=new java.util.ArrayList<>();
+   try{
+    org.json.JSONObject pj=new JSONObject(pkg);
+    for(String key:new String[]{"dependencies","devDependencies"}){
+     JSONObject d=pj.optJSONObject(key);
+     if(d==null)continue;
+     for(Iterator<String> it=d.keys();it.hasNext();){
+      String dep=it.next();
+      if(!deps.contains(dep))deps.add(dep);
+     }
+    }
+   }catch(Exception ignored){}
+   if(!deps.isEmpty()){
+    int n=Math.min(deps.size(),20);
+    sb.append("\n依赖：");
+    for(int i=0;i<n;i++){if(i>0)sb.append("、");sb.append(deps.get(i));}
+    if(deps.size()>n)sb.append(" 等 ").append(deps.size()).append(" 个");
+   }
+  }
+  sb.append("\n要看具体文件用 list_files，要读内容用 read_file。");
+  return sb.toString();
+ }
+
+static String instructions(boolean project,boolean nativeTools){
  /*
   * 分成两段写：「不分场合都该知道的」和「有项目才用得上的」。
   *
@@ -51,21 +159,52 @@ final class LocalDevTools {
   +"\n- run_tests()：跑项目里的单元测试。测试文件按 *.test.ts / *.test.js / *.spec.ts 命名，"
   +"里面直接用 describe / it / expect（已经注入全局，不用 import），也认 @jest/globals 的 import 写法。"
   +"改了逻辑就跑一下，比肉眼看靠谱。"
+  +"结果里 ok 是「这次验证通过了没有」。项目里没有测试文件时 ok 会是 false、ran 是 false —— "
+  +"那表示没得跑，不是跑挂了，别当成代码有问题去反复改。"
   +"\n- run_script(code)：在隔离沙箱里跑一段 JS。可以 await fetch('/project.json') 读项目文件、"
   +"console.log 看中间值、最后 window.__neoResult=... 交出返回值。适合验算数据、试算法、批量分析文件。"
   +"沙箱里没有 node、装不了 npm 包、也连不了网 —— 这是隔离，不是限制。";
 
- if(!project)return "本轮没有指定项目。这几类工具照常可用："+common
+ if(!project)return "本轮没有指定项目。用户问的是问题就先直接回答，别急着调工具；"
+  +"需要动手时先用一句话说明你要做什么，干完用自然语言说结果。"
+  +"这几类工具照常可用："+common
   +"\n\n另外还能用 search_connectors(query)、describe_connector(id,query可选,offset可选) 查官方连接器。"
-  +"\n需要工具时只返回 JSON：{\"tools\":[{\"name\":\"工具名\",\"args\":{...}}]}。轮数不限；做完正常用文字回答。";
+  +"\n"+callProtocol(nativeTools)+"。工具调用最多 40 轮；做完正常用文字回答。";
 
  return "你是一个能真正动手的编程助手，不是只会给建议的聊天机器人。"
+  /*
+   * 【怎么跟用户说话】—— 这段是加的。
+   *
+   * <p><b>不加会怎样：</b>用户问「你能看到打开的项目吗？」，
+   * 模型直接甩一串 JSON 或一句「已保存到指定项目」，
+   * 用户问的「能不能看到」根本没有被回答。
+   *
+   * <p>根因是提示词只教了「怎么调工具」，没教「先答问题」。
+   * 模型把「完成一次工具调用」当成了「回答用户」。
+   */
+  +"\n\n【怎么跟用户说话】"
+  +"\n1. 用户问的是问题，就先回答问题。项目概览在本提示词里，"
+  +"照实说就行（「能，这个项目有 42 个文件，是 Vite + React」），"
+  +"不要凭印象报数字。"
+  +"\n   这句话要和工具调用放在<同一条回复>里：先给结论，再发工具调用。"
+  +"只发文字不发工具调用，等于这一轮就结束了，活根本没干 ——"
+  +"要动手就必须真的把工具调用发出去。"
+  +"\n2. 动手之前先用一句话说明你要做什么（「我先看下项目结构」），"
+  +"让人知道没卡住。别让工具调用凭空出现。"
+  +"\n3. 干完用人话说结果：改了哪几个文件、验证过没有、哪些没做、有什么风险。"
+  +"别用「已保存到指定项目」这种系统通知代替回答。"
+  +"\n4. 不要把 JSON、文件清单、工具参数原样甩给用户 —— 那是给你自己看的。"
+  +"\n5. 说错了就承认，别绕。用户问「你刚才真的改了吗」，"
+  +"就说清改了哪些文件、验证过没有。"
   +"\n\n【铁律】"
   +"\n1. 不要凭记忆猜文件内容。要看就用 read_file，要定位就用 search_code。"
   +"\n2. 改代码前必须先读那个文件。没读过就改，等于闭着眼睛写。"
   +"\n3. 改完系统会自动跑一次编译，结果会返回给你。编译不过就自己修，别把坏代码交给用户。"
   +"\n4. 不要声称做过没做过的事。没验证就说没验证。"
-  +"\n5. 一次只做用户要求的事，别顺手大改无关文件。"
+  +"\n5. 回答问题要直接回答。用户问「你能看到这个项目吗」，"
+  +"第一句就该照实说「能，有 N 个文件，是……」，而不是先去调工具，"
+  +"更不要凭空编一个数字 —— 概览里没有的事就说不确定。"
+  +"\n6. 一次只做用户要求的事，别顺手大改无关文件。"
   +"\n\n【计划】"
   +"\n- write_plan(steps)：把要做的事列成清单。数组，每项 {text, done}。"
   +"开工前先写一次，做完一项改一次 done，这样长任务不会跑偏，用户也能看到进度。"
@@ -74,17 +213,26 @@ final class LocalDevTools {
   +"\n① list_files 看结构 → ② search_code 定位 → ③ read_file 读内容"
   +"\n④ patch_file / multi_patch / replace_text 改动 → ⑤ diff_mine 自查改了哪些行"
   +"\n⑥ 看自动编译结果 → ⑦ 改的是逻辑就跑 run_tests → ⑧ 有错继续修，直到通过才交付"
-  +"\n\n【调用方式】需要工具时只返回 JSON，不要夹带其他文字："
-  +"{\"tools\":[{\"name\":\"工具名\",\"args\":{...}}]}。可以一次调用多个工具。"
+  +"\n\n【调用方式】"+callProtocol(nativeTools)+"。"
+  +"一轮之内最多可以连续调用工具 40 次 —— 复杂任务要分步做，别指望一次跑完。"
+  +"动手前先用一两句话说明你要做什么 —— 用户要看到你的动作；"
+  +"但不要夹带大段解释、也不要重复解释代码。"
   +"\n\n【工具清单】"
-  +"\nlist_files(prefix可选目录前缀,depth可选展开层数)：按目录分组列出文件，带行数与类型。"
+  +"\nlist_files(prefix可选目录前缀,depth可选展开层数,entryLimit可选默认500最多2000)：按目录分组列出文件，带行数与类型。"
+  +"没列全时会明说还剩多少，那时用 prefix 缩到某个目录再看。"
   +"\nread_file(path,startLine可选,lineCount可选)：读文件；不指定范围就读整份。"
-  +"\nsearch_code(query,prefix可选,glob可选,regex可选true用正则,ignoreCase可选)：搜索，返回文件+行号+该行内容。"
+  +"只读到一部分时结果里会告诉你还剩多少行、从哪行接着读。"
+  +"\nsearch_code(query,prefix可选,glob可选,regex可选true用正则,ignoreCase可选,limit可选默认50最多200)：搜索，返回文件+行号+该行内容。"
+  +"命中到上限时结果里会给 possiblyMore=true，那说明还有更多 —— 缩小 prefix/glob 或换更具体的词再搜。"
   +"例：找所有 tsx 里的某个词 → glob=\"*.tsx\"；只搜某目录 → prefix=\"src/app\"；写复杂条件 → regex=true。"
   +"\npatch_file(path,startLine,endLine,newContent)：按行范围替换，只动指定那几行，其余原样保留。"
-  +"改代码首选这个 —— 不用把整个文件重写一遍，也不会误伤没读到的部分。行号从1开始、含首尾。"
+  +"改代码首选这个 —— 不用把整个文件重写一遍，也不会误伤没读到的部分。"
+  +"行号从 1 开始；endLine 不含在替换范围内（写 10 表示到第 9 行结束），"
+  +"只改一行时不用传 endLine。"
   +"\nreplace_text(path,oldText,newText)：精确替换；oldText 必须在文件里只出现一次，适合改一两句。"
   +"\nmulti_patch(patches数组)：一次改多个文件的多个位置，每项 {path,startLine,endLine,newContent}。"
+  +"endLine 规则和 patch_file 一样。行号一律按「改之前」的文件算，"
+  +"不用操心前面一处改动会不会把后面的行号顶掉 —— 系统会从后往前应用。"
   +"要动两个以上文件就优先用它，别一个一个发。"
   +"\nwrite_files(files文件对象)：暂存并校验，最终一次写入。新增文件或大范围重写才用它。"
   +"\ninspect_project：项目概览（文件数、package.json、运行环境说明）。"
@@ -99,7 +247,9 @@ final class LocalDevTools {
   +"\nbuild_apk：本机编译并打包暂存快照。"
   +common
   +"\n\n【约束】工具只能操作当前指定项目；没有系统 shell（只有上面的 JS 沙箱）；"
-  +"不可修改凭据、签名材料或二进制资源；结束时返回严格 JSON files 对象。";
+  +"不可修改凭据、签名材料或二进制资源；"
+  +(nativeTools?"文件改动直接通过工具写入，结束时用自然语言说明改了什么。"
+                :"结束时返回严格 JSON files 对象。");
  }
 
 /**
@@ -194,6 +344,68 @@ final class LocalDevTools {
   return saved==null?empty:saved;
  }
 
+ /*
+  * ── 防原地打转 ──────────────────────────────
+  *
+  * <p>模型有时会陷进一个圈：读同一个文件、搜同一个词，一遍又一遍，
+  * 每一轮都「成功」，所以熔断（只统计整轮全败）根本不会触发。
+  * 40 轮就这么耗完，用户等几分钟，最后什么也没改。
+  *
+  * <p>所以这里按「工具名 + 参数」记住上一次的结果。
+  * 连续两次拿到完全一样的结果，说明这一轮调用没有带来任何新信息。
+  *
+  * <p>第三次起不再重复贴全文，只回一句「结果和上次一样」——
+  * 既省 token（大文件全文贴三遍能吃掉一整轮预算），
+  * 又明确告诉模型该换做法了。
+  *
+  * <p>为什么不靠参数判断「重复」：改完文件之后再读同一个文件，
+  * 参数一样但结果变了，那是正常行为。按结果判断才不会误伤。
+  */
+ private final java.util.HashMap<String,String> lastResult=new java.util.HashMap<>();
+ private final java.util.HashMap<String,Integer> sameCount=new java.util.HashMap<>();
+
+ /** 只读工具才做这个判断：写工具的重复调用可能有真实意图。 */
+ static boolean isReadOnly(String n){
+  return n.equals("read_file")||n.equals("list_files")||n.equals("search_code")
+   ||n.equals("inspect_project")||n.equals("list_assets")||n.equals("list_art_models")
+   ||n.equals("diff_mine")||n.equals("diff_project")||n.equals("check_project")
+   ||n.equals("read_plan");
+ }
+
+ /**
+  * 调工具，并顺手挡掉「同参数、同结果」的空转。
+  *
+  * @param name 工具名
+  * @param args 参数
+  * @return 工具结果；重复空转时返回一条说明而不是全文
+  */
+ JSONObject callOnce(String name,JSONObject args)throws Exception{
+  JSONObject r=call(name,args);
+  if(!isReadOnly(name))return r;
+  String sig=name+"|"+(args==null?"{}":args.toString());
+  String now=r==null?"":r.toString();
+  String prev=lastResult.get(sig);
+  if(now.equals(prev)){
+   int n=sameCount.containsKey(sig)?sameCount.get(sig)+1:2;
+   sameCount.put(sig,n);
+   if(n>=3){
+    JSONObject same=new JSONObject().put("unchanged",true).put("times",n)
+     .put("note","「"+name+"」用完全相同的参数已经连续拿到 "+n+" 次一模一样的结果，"
+      +"这次没有再重复贴一遍全文。这说明这条路查不出新东西了 —— "
+      +"请换个做法：换参数、换工具、换搜索词，或者把已经拿到的结论直接告诉用户。"
+      +"如果你确实需要再完整看一次内容，请用 startLine/lineCount 分段读，"
+      +"并说明为什么之前那份不够用。");
+    sameCount.put(sig,n);
+    return same;
+   }
+   r.put("repeatHint","注意：这是你和上一轮完全一样的调用，结果也一样。不必重复调用。");
+   return r;
+  }
+  lastResult.put(sig,now);
+  sameCount.put(sig,1);
+  return r;
+ }
+
 JSONObject call(String name,JSONObject args)throws Exception{
   if(name.equals("search_connectors"))return a.connectors.search(args.optString("query"));if(name.equals("describe_connector"))return a.connectors.describe(args.getString("id"),args.optString("query"),args.optInt("offset"));
   // 不依赖项目的工具先处理掉：记忆、技能、联网、GitHub 状态
@@ -229,8 +441,69 @@ JSONObject call(String name,JSONObject args)throws Exception{
    case "generate_image":if(artCalls>=3)throw new Exception("本轮已达到3次绘图调用限制，请先使用已有资源");artCalls++;return a.art.tool(staged,args);
    case "inspect_project":out.put("name",staged.optString("name")).put("fileCount",files.length()).put("cloudSource",staged.optBoolean("cloudSource")).put("packageJson",files.optString("package.json","")).put("environment","离线 HTML/CSS/JS、TS/TSX/JSX 编译、React 与预装依赖、Tailwind 3；WebView隔离运行。原生Android/Node服务端/npm安装需外部环境。工具可以读写、搜索、检查、预览、离线打包和取回日志。");break;
    case "list_files":out.put("files",listFiles(files,staged,args));break;
-   case "read_file":String path=args.getString("path");if(!files.has(path))throw new Exception("文件不存在");String[] lines=files.getString(path).split("\\n",-1);int start=Math.max(1,args.optInt("startLine",1)),count=Math.max(1,args.optInt("lineCount",lines.length));StringBuilder text=new StringBuilder();for(int i=start-1;i<Math.min(lines.length,start-1+count);i++){text.append(i+1).append(": ").append(lines[i]).append('\n');}out.put("path",path).put("totalLines",lines.length).put("content",text.toString());break;
-   case "search_code":out.put("matches",searchCode(files,args));break;
+   case "read_file":{
+    /*
+     * 读文件。越界要明说，不能返回空内容。
+     *
+     * <p>原来 startLine 超出文件行数时，循环一次都不执行，
+     * 返回的 content 是空串。模型拿到的结果是
+     * {@code {path, totalLines:100, content:""}} ——
+     * 它会以为这 100 行全是空行，或者以为文件读不出来，
+     * 于是换个行号再试，白烧几轮。
+     *
+     * <p>所以越界直接报错，并把真实行数说出来：
+     * 模型立刻知道该从哪读，不用猜。
+     */
+    String path=args.getString("path");
+    if(!files.has(path))throw new Exception(fileMissingMessage(path,files));
+    String[] lines=files.getString(path).split("\\n",-1);
+    int start=Math.max(1,args.optInt("startLine",1));
+    int count=Math.max(1,args.optInt("lineCount",lines.length));
+    if(start>lines.length)throw new Exception("起始行 "+start+" 超出文件总行数："+path+" 一共 "
+     +lines.length+" 行。请把 startLine 取在 1 到 "+lines.length+" 之间，或者不传 startLine 读整份。");
+    int end=Math.min(lines.length,start-1+count);
+    StringBuilder text=new StringBuilder();
+    for(int i=start-1;i<end;i++){text.append(i+1).append(": ").append(lines[i]).append('\n');}
+    out.put("path",path).put("totalLines",lines.length).put("content",text.toString())
+     .put("startLine",start).put("endLine",end).put("returnedLines",end-start+1);
+    /* 只读到一部分时说明还有多少 —— 模型才知道要不要接着读。 */
+    if(end<lines.length)
+     out.put("note","这次只读到第 "+end+" 行，后面还有 "+(lines.length-end)
+      +" 行。要接着读就传 startLine="+(end+1)+"。");
+    break;
+   }
+   case "search_code":{
+    JSONObject sr=searchCode(files,args);
+    JSONArray found=sr.optJSONArray("matches");
+    if(found==null)found=new JSONArray();
+    out.put("matches",found);
+    /*
+     * 命中数撞到上限时，要明说「还有更多」。
+     * 不说的话，模型会以为这 50 条就是全部，
+     * 于是得出「项目里只有这些地方用到它」这种错误结论。
+     */
+    if(sr.optBoolean("possiblyMore",false)){
+     out.put("possiblyMore",true).put("limit",sr.optInt("limit",50))
+      .put("note","结果已达上限 "+sr.optInt("limit",50)+" 条，可能还有更多命中。"
+       +"要看得更全，请缩小 prefix/glob 范围，或换个更具体的搜索词。");
+    }
+    /*
+     * 搜不到的时候，要说清楚「搜过了、没找到」，
+     * 别让模型对着一个空数组自己猜 —— 它可能以为项目里根本没这段代码，
+     * 于是得出错误结论；也可能以为是搜索词拼错了。
+     *
+     * 顺便把搜索范围报出来：搜了几个文件、命中几个。
+     */
+    if(found.length()==0){
+     out.put("found",false).put("searchedFiles",files.length())
+      .put("note","搜索词「"+args.optString("query","")+"」在本项目 "+files.length()+" 个文件里没有命中。"
+       +"可能是代码确实不存在，也可能是用词不同（试试更短的关键字、或换个同义词），"
+       +"也可能文件在二进制目录里没被索引。可先用 list_files 看有哪些文件，再 read_file 直接读。");
+    }else{
+     out.put("found",true);
+    }
+    break;
+   }
    case "replace_text":String editPath=args.getString("path"),oldText=args.getString("oldText"),newText=args.getString("newText");if(!files.has(editPath)||oldText.isEmpty())throw new Exception("无效的精确替换参数");String current=files.getString(editPath);int at=current.indexOf(oldText);if(at<0||current.indexOf(oldText,at+1)>=0)throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");String replaced=current.substring(0,at)+newText+current.substring(at+oldText.length());staged=ProjectEdits.apply(staged,files,new JSONObject().put(editPath,replaced),"AI 暂存");out.put("staged",true).put("path",editPath).put("replacements",1);break;
    case "patch_file":out.put("result",patchFile(files,args));break;
    /*
@@ -244,8 +517,21 @@ JSONObject call(String name,JSONObject args)throws Exception{
     JSONArray patches=args.optJSONArray("patches");
     if(patches==null||patches.length()==0)throw new Exception("patches 不能为空，格式：[{path,startLine,endLine,newContent}]");
     JSONArray done=new JSONArray();JSONArray failed=new JSONArray();
-    for(int pi=0;pi<patches.length();pi++){
-     JSONObject pc=patches.getJSONObject(pi);
+    /*
+     * 从行号大的往小的改。
+     *
+     * <p><b>为什么必须这样：</b>模型给的行号都是按<b>原文件</b>算的。
+     * 如果先改第 2 行（插入三行），原第 10 行就变成第 13 行，
+     * 接着按「第 10 行」去改就改错了地方 —— 而且不会报错，
+     * 只是悄悄改坏了不相干的内容。
+     *
+     * <p>从后往前改，前面还没动，行号就一直有效。
+     */
+    java.util.ArrayList<JSONObject> ordered=new java.util.ArrayList<>();
+    for(int pi=0;pi<patches.length();pi++)ordered.add(patches.getJSONObject(pi));
+    ordered.sort((x,y)->Integer.compare(y.optInt("startLine",0),x.optInt("startLine",0)));
+    for(int pi=0;pi<ordered.size();pi++){
+     JSONObject pc=ordered.get(pi);
      try{done.put(patchFile(staged.getJSONObject("files"),pc));}
      catch(Exception e){failed.put(new JSONObject().put("path",pc.optString("path","")).put("error",e.getMessage()==null?"失败":e.getMessage()));}
     }
@@ -303,7 +589,19 @@ JSONObject call(String name,JSONObject args)throws Exception{
    case "github_push":return a.gh.push(staged,args.optString("repo",""),args.optString("message",""),
     args.optBoolean("private",true),msg->a.runOnUiThread(()->a.toast(msg)));
    case "build_apk":CloudFiles.entries(staged);int number;synchronized(a){number=a.byId("projects",staged.getString("id")).optInt("buildNumber",0)+1;}JSONObject build=OfflineBuilder.build(a,staged,number);build.put("stagedSnapshot",true);synchronized(a){JSONObject p=a.byId("projects",staged.getString("id"));JSONArray builds=p.optJSONArray("builds");if(builds==null){builds=new JSONArray();p.put("builds",builds);}builds.put(build);p.put("buildNumber",number);a.saveState();}return new JSONObject().put("build",build).put("message","暂存快照APK已构建；未自动安装，未代表实际运行通过");
-   default:throw new Exception("不支持的工具："+name);
+   default:
+    /*
+     * 工具名写错时，要告诉模型**正确的名字有哪些**。
+     *
+     * <p>只说「不支持的工具：xxx」是不够的：模型不知道自己该写什么，
+     * 下一轮大概率再猜一个错的名字，然后又是同样的错 ——
+     * 三轮下来触发熔断，用户只看到一句「工具调用全部失败」。
+     *
+     * <p>把可用工具名列出来，模型下一轮就能自己对上。
+     * 另外做一次「最接近的名字」提示，省得它靠猜。
+     */
+    throw new Exception("不支持的工具："+name+"。可用工具："+availableToolNames()
+     +"。请从上面这些名字里选一个，参数名要照工具说明里的写。");
   }return out;
  }
  /**
@@ -337,17 +635,50 @@ JSONObject call(String name,JSONObject args)throws Exception{
    if(levels>depth)dir=dir.substring(0,dir.lastIndexOf('/',dir.length()-1)+1)+"…";
    byDir.computeIfAbsent(dir,k->new java.util.ArrayList<>()).add(n);
   }
+  /*
+   * 文件条目总数上限。
+   *
+   * <p>大项目（几千个文件）全列出来，光这个 JSON 就几百 KB —— 一轮工具
+   * 预算 48 KB 会被它一个工具吃光，同轮的其他工具结果全被挤掉。
+   *
+   * <p>而且模型真要挨个看几千个文件也没意义 —— 它需要的是结构，
+   * 剩下的用 prefix 缩小范围再看。所以这里限 500 条，
+   * 超了就明说「还有多少没列出来」。
+   */
+  int entryLimit=Math.max(1,Math.min(2000,args.optInt("entryLimit",500)));
+  int listed=0;
+  int totalEntries=0;
+  for(java.util.ArrayList<String> v:byDir.values())totalEntries+=v.size();
   for(java.util.Map.Entry<String,java.util.ArrayList<String>> e:byDir.entrySet()){
    JSONArray group=new JSONArray();
    java.util.Collections.sort(e.getValue());
    for(String n:e.getValue()){
+    if(listed>=entryLimit)break;
     String content=files.optString(n,"");
+    /*
+     * 算行数用 indexOf 循环，不逐字符扫。
+     * 逐字符 charAt 在大文件上是 O(n) 的解释执行，比 indexOf 慢一个量级；
+     * 82 MB 的项目里这一项能差出好几秒。
+     */
     int lines=1;
-    for(int i=0;i<content.length();i++)if(content.charAt(i)=='\n')lines++;
+    int nl=content.indexOf('\n');
+    while(nl>=0){lines++;nl=content.indexOf('\n',nl+1);}
     group.put(new JSONObject().put("path",n).put("lines",lines).put("characters",content.length())
      .put("kind",kindOf(n)));
+    listed++;
    }
    out.put(new JSONObject().put("dir",e.getKey()).put("count",group.length()).put("files",group));
+   if(listed>=entryLimit)break;
+  }
+  /*
+   * 文件没列全时必须说明 —— 不说的话，模型会以为项目就这么点文件，
+   * 于是得出「这个项目只有这几个模块」这种错误结论。
+   */
+  if(listed<totalEntries){
+   out.put(new JSONObject().put("dir","（还有 "+(totalEntries-listed)+" 个文件没列出来）")
+    .put("count",totalEntries-listed).put("files",new JSONArray())
+    .put("note","文件条目已达上限 "+entryLimit+" 条，还有 "+(totalEntries-listed)
+     +" 个文件没列出来。请用 prefix 指定目录，或用 depth 调小展开层数再列一次。"));
   }
   // 二进制与大文件单列 —— 模型需要知道它们存在但读不了
   if(bins!=null){
@@ -387,17 +718,29 @@ JSONObject call(String name,JSONObject args)throws Exception{
   * </ul>
   *
   * @param files 项目文本文件表
-  * @param args  参数：{@code query}，{@code prefix}，{@code regex}，{@code ignoreCase}
-  * @return 命中列表
+  * @param args  参数：{@code query}，{@code prefix}，{@code glob}，{@code regex}，{@code ignoreCase}，{@code limit}
+  * @return 含 {@code matches}（命中列表）、{@code possiblyMore}（是否可能还有更多）、{@code limit} 的对象
   */
- private JSONArray searchCode(JSONObject files,JSONObject args)throws Exception{
+ private JSONObject searchCode(JSONObject files,JSONObject args)throws Exception{
   String q=args.optString("query","").trim();
   if(q.isEmpty()||q.length()>300)throw new Exception("搜索词需为1到300字符");
   String prefix=args.optString("prefix","").trim();
   String glob=args.optString("glob","").trim();
   boolean regex=args.optBoolean("regex",false);
   boolean ignoreCase=!args.has("ignoreCase")||args.optBoolean("ignoreCase",true);
-  int limit=Math.max(1,args.optInt("limit",Integer.MAX_VALUE));
+  /*
+   * 结果条数上限。
+   *
+   * <p><b>为什么不能没有上限：</b>模型搜个常见词（"import"、"e"、"const"）
+   * 就能在几千个文件里命中几万行。每行最多 400 字符，几万行就是几 MB 的
+   * JSON —— 先把内存吃光（和之前的 OOM 一回事），再被外层整体截断成
+   * <b>非法 JSON</b>，模型看到半个数组，更糟。
+   *
+   * <p>所以默认 50 条、硬上限 200 条。schema 里本来就写着「默认 50」，
+   * 但实现里是 Integer.MAX_VALUE —— 服务端一般不会替模型填默认值，
+   * 模型不传 limit 就是真的无上限。这是个实打实的坑。
+   */
+  int limit=Math.min(200,Math.max(1,args.optInt("limit",50)));
   java.util.regex.Pattern pattern;
   if(regex){
    try{
@@ -407,17 +750,20 @@ JSONObject call(String name,JSONObject args)throws Exception{
    pattern=java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(q),ignoreCase?java.util.regex.Pattern.CASE_INSENSITIVE:0);
   }
   JSONArray matches=new JSONArray();
-  for(Iterator<String> it=files.keys();it.hasNext()&&matches.length()<limit;){
+  boolean more=false;
+  for(Iterator<String> it=files.keys();it.hasNext();){
+   if(matches.length()>=limit){more=true;break;}
    String n=it.next();
    if(!prefix.isEmpty()&&!n.startsWith(prefix))continue;
    if(!glob.isEmpty()&&!globMatch(n,glob))continue;
    String[] code=files.getString(n).split("\\n");
-   for(int i=0;i<code.length&&matches.length()<limit;i++){
+   for(int i=0;i<code.length;i++){
+    if(matches.length()>=limit){more=true;break;}
     if(pattern.matcher(code[i]).find())
      matches.put(new JSONObject().put("path",n).put("line",i+1).put("text",code[i].trim().substring(0,Math.min(400,code[i].trim().length()))));
    }
   }
-  return matches;
+  return new JSONObject().put("matches",matches).put("possiblyMore",more).put("limit",limit);
  }
 
  /**
@@ -501,8 +847,52 @@ JSONObject call(String name,JSONObject args)throws Exception{
   if(lineCount==0)throw new Exception("文件是空的，没有可替换的行");
 
   int start=Math.max(1,args.optInt("startLine",0));
-  int end=Math.min(lineCount,args.optInt("endLine",0));
-  if(end<start)throw new Exception("行号范围无效：startLine="+start+" endLine="+end+"（文件共 "+lineCount+" 行）");
+  /*
+   * 这里踩过两个坑，都跟 endLine 的默认值和下标含义有关。
+   *
+   * <p><b>坑一：不传 endLine 必然报错。</b>
+   * 原作 {@code Math.min(lineCount,args.optInt("endLine",0))}，
+   * 不传得到 0，接着 end<start 抛「行号范围无效」。
+   * 而「只改一行」是最常见的改法 —— 最普通的调用反而一定失败。
+   * 模型会以为行号算错，重新读文件、重新数行、再试还是错，耗到轮数上限。
+   *
+   * <p><b>坑二：把 endLine 当数组索引，吃掉一行。</b>
+   * {@code list.subList(end,lineCount)} 里 end 是 0-based，
+   * endLine 是 1-based。startLine=2、endLine=3 本意「只改第 2 行」，
+   * 却因为 subList(3,3) 为空而把第 3 行整行删掉。
+   * 这种错模型自己发现不了 —— diff_mine 只说「第 2 行变了」，
+   * 少掉的那行要等用户跑起来才知道。
+   *
+   * <p>现在统一成 1-based 半开区间：替换 [startLine, endExclusive)，
+   * 尾部从索引 endExclusive-1 开始保留。不传 endLine 时只改一行。
+   */
+  int endLineArg=args.optInt("endLine",0);
+  /*
+   * endLine 是「1 起、不含」的行号，不是数组索引。
+   *
+   * <p><b>差一个索引会吃掉一行。</b>原来先把 endLine 直接当索引传进
+   * {@code list.subList(end, lineCount)}，于是：
+   * startLine=2、endLine=3（本意「只改第 2 行」）→ subList(3,3) 是空的
+   * → 第 3 行被整行删掉。
+   *
+   * <p>模型改完自己也不会发现 —— diff_mine 显示的是「第 2 行变了」，
+   * 少掉的那一行要到用户跑起来才发现。这类 bug 比报错可怕得多。
+   *
+   * <p>所以这里统一成 1-based 的半开区间：替换 [startLine, endExclusive)，
+   * 尾部从索引 endExclusive-1 开始保留。不传 endLine 时只改一行。
+   */
+  int endExclusive=endLineArg>0?Math.min(lineCount+1,Math.max(start+1,endLineArg)):start+1;
+  /*
+   * endLine <= startLine 不报错，当作「只改这一行」。
+   *
+   * <p>模型有两种直觉：有人把 endLine 当「含」，于是写
+   * startLine=3、endLine=3 想改第 3 行；也有人按「不含」写 startLine=3、endLine=4。
+   * 两种都得能用 —— 对着一个行号范围报错，模型只会以为行号算错了，
+   * 重新读文件、重新数行，再试一次还是同样的写法，白烧几轮。
+   *
+   * <p>所以这里一律往上兜到「至少改一行」，并在结果里说明它实际改的是哪几行。
+   */
+  boolean endLineClamped=endLineArg>0&&endLineArg<=start;
   if(start>lineCount)throw new Exception("起始行 "+start+" 超出文件行数 "+lineCount);
 
   // newContent 末尾的换行是格式噪音，去掉，否则会多出空行
@@ -511,7 +901,7 @@ JSONObject call(String name,JSONObject args)throws Exception{
 
   java.util.ArrayList<String> result=new java.util.ArrayList<>(list.subList(0,start-1));
   if(!nc.isEmpty())for(String s:nc.split("\\n",-1))result.add(s);
-  result.addAll(list.subList(end,lineCount));
+  result.addAll(list.subList(endExclusive-1,lineCount));
 
   StringBuilder sb=new StringBuilder();
   for(int i=0;i<result.size();i++){
@@ -524,13 +914,21 @@ JSONObject call(String name,JSONObject args)throws Exception{
   staged=ProjectEdits.apply(staged,files,new JSONObject().put(path,replaced),"AI 暂存");
   // 回显改动前的原文，模型能自己确认改对了地方
   StringBuilder before=new StringBuilder();
-  for(int i=start-1;i<Math.min(end,start-1+8)&&i<list.size();i++)before.append(list.get(i)).append('\n');
+  for(int i=start-1;i<Math.min(endExclusive-1,start-1+8)&&i<list.size();i++)before.append(list.get(i)).append('\n');
   JSONObject result2=new JSONObject();
   result2.put("staged",true).put("path",path)
-   .put("replacedLines",end-start+1).put("newLines",nc.isEmpty()?0:nc.split("\\n",-1).length)
+   .put("replacedLines",endExclusive-start).put("newLines",nc.isEmpty()?0:nc.split("\\n",-1).length)
    .put("totalLinesAfter",trailingNewline&&result.isEmpty()?0
      :replaced.split("\\n",-1).length-(replaced.endsWith("\n")?1:0))
    .put("before",before.toString());
+  /*
+   * 告诉模型实际改的是哪几行。endLine 两种直觉都能用，
+   * 但结果里要如实回报，模型才能核对。
+   */
+  result2.put("replacedFrom",start).put("replacedTo",endExclusive-1);
+  if(endLineClamped)
+   result2.put("note","endLine="+endLineArg+" 不大于 startLine="+start+"，按「只改这一行」处理，"
+    +"实际替换的是第 "+start+" 行。");
   return result2;
  }
 
@@ -635,6 +1033,46 @@ JSONObject call(String name,JSONObject args)throws Exception{
     .put("modified",modified.length()).put("removed",removed.length()).put("unchanged",same))
    .put("note",added.length()+modified.length()+removed.length()==0
     ?"本轮还没有改动任何文件":"以上是本轮相对起点的全部改动");
+ }
+
+ /**
+  * 文件找不到时，把「你要的路径」和「实际有哪些」一起给出去。
+  *
+  * <p>只说一句「文件不存在」，模型只知道失败，不知道该换成什么路径 ——
+  * 下一轮它多半再猜一个，还是错。三轮下来就触发熔断，
+  * 明明只是路径写错了一个字母。
+  *
+  * <p>所以这里附上现有文件清单。清单可能很长，只给前 40 个，
+  * 但足够模型对上名字了。
+  */
+ static String fileMissingMessage(String path,JSONObject files){
+  StringBuilder sb=new StringBuilder();
+  sb.append("文件不存在：").append(path).append("。本项目现有文件：");
+  Iterator<String> it=files.keys();int n=0;StringBuilder names=new StringBuilder();
+  while(it.hasNext()){
+   String k=it.next();
+   if(n++>0)names.append("、");
+   names.append(k);
+   if(n>=40){names.append(" 等").append(files.length()).append("个");break;}
+  }
+  sb.append(names.length()==0?"（没有文件）":names.toString());
+  sb.append("。请照上面的路径重试，路径要完全一致。");
+  return sb.toString();
+ }
+
+ /**
+  * 列出所有可用工具名，给模型对照用。
+  *
+  * <p>工具名拼错是最常见的模型失误（少个下划线、把 list_files 写成 listFile）。
+  * 光说「不支持」模型改不了；把清单给它，它一眼就能看出该用哪个。
+  */
+ static String availableToolNames()throws Exception{
+  StringBuilder sb=new StringBuilder();
+  for(ToolSchema.Tool st:ToolSchema.all()){
+   if(sb.length()>0)sb.append("、");
+   sb.append(st.name);
+  }
+  return sb.toString();
  }
 
  JSONObject finalChanges(JSONObject changes)throws Exception{JSONObject next=ProjectEdits.apply(staged,staged.getJSONObject("files"),changes,"AI 暂存").getJSONObject("files"),old=original.getJSONObject("files"),out=new JSONObject();for(Iterator<String> it=next.keys();it.hasNext();){String n=it.next();if(!next.getString(n).equals(old.optString(n,null)))out.put(n,next.getString(n));}for(Iterator<String>it=old.keys();it.hasNext();){String n=it.next();if(!next.has(n))out.put(n,JSONObject.NULL);}return out;}

@@ -84,20 +84,45 @@ final class ToolSchema {
   */
  static Tool[] all()throws Exception{
   return new Tool[]{
-   new Tool("list_files","列出项目里的文件，按目录分组。只看有哪些文件时用这个，不要凭猜测去读文件。",obj("prefix",str("只列这个目录下的，留空表示全部",""),"depth",num("列几层目录，默认 3，最多 6",3))),
+   new Tool("list_files","列出项目里的文件，按目录分组。只看有哪些文件时用这个，不要凭猜测去读文件。",obj("prefix",str("只列这个目录下的，留空表示全部",""),"depth",num("列几层目录，默认 3，最多 6",3),"entryLimit",num("最多列多少个文件条目，默认 500，最多 2000",500))),
    new Tool("inspect_project","看项目概况：文件数、package.json 内容、能跑什么环境。开始改代码前先调一次。",obj()),
    new Tool("list_assets","列出项目里已有的图片素材（路径和引用方式）。要复用素材而不是重新生成时用这个。",obj()),
    new Tool("list_art_models","列出可用的绘图模型和它们的风格、价格。生成图片前先看有哪些选择。",obj()),
+   /*
+    * 连接器查询工具也漏过。
+    *
+    * <p>和 generate_image 同一个毛病：提示词里写着「还能用 search_connectors」，
+    * 但 schema 里没有，原生路径下模型调不到 —— 查官方连接器的能力静默消失。
+    *
+    * <p>这两个是只读查询，没有副作用，放开给模型用是安全的。
+    */
+   new Tool("search_connectors","搜索官方连接器目录。需求涉及设备、系统、支付、地图、网盘等官方能力时，先用它找有没有现成连接器。",
+    obj("query",req(str("要搜的能力关键词，例如 支付、蓝牙、地图、网盘")))),
+   new Tool("describe_connector","看某个官方连接器有哪些工具、有什么限制、适用哪些构建器。搜索到候选后用它核对细节。",
+    obj("id",req(str("连接器 id，来自 search_connectors 的结果")),"query",str("想进一步问的问题，留空表示只看工具清单",""),"offset",num("分页偏移，留空从 0 开始",0))),
+   /*
+    * generate_image 原来只在文本协议的提示词里出现过，
+    * 原生 function calling 的 schema 里**漏了**。
+    *
+    * <p>后果：模型在原生路径下**根本调不到绘图工具** ——
+    * 提示词说「绘图工具可用」，schema 里没有这个工具，
+    * 服务端只会把 schema 里有的工具给模型，于是绘图功能静默消失。
+    * 这就是「原生改造引入功能回退」的典型：一边是提示词，一边是 schema，
+    * 改一边忘了另一边。
+    */
+   new Tool("generate_image","生成一张图片并保存到项目里。要画插图、图标、背景时用这个。每轮最多 3 张，先用 list_assets 看看有没有能复用的。",
+    obj("prompt",req(str("要画什么，1 到 6000 字的画面描述")),"path",str("保存路径，例如 assets/hero.png，留空自动命名",""),"referenceFile",str("参考图的路径（例如照着已有素材画），留空表示不用参考",""),"placeholder",str("占位提示文字，图片生成后由代码替换",""))),
    new Tool("read_file","读一个文件的内容。文件大时可以只读一部分（startLine/lineCount）。",obj("path",req(str("文件路径，例如 src/App.tsx")),"startLine",num("从第几行开始读，默认 1",1),"lineCount",num("读多少行，默认读到文件末尾"))),
-   new Tool("search_code","在项目里搜代码。找函数在哪定义、找某个字符串被谁用了，用这个。",obj("query",req(str("要搜索的字符串或正则表达式")),"regex",bool("query 是正则表达式吗，默认 false",false),"ignoreCase",bool("忽略大小写，默认 true",true),"glob",str("只搜匹配这个模式的文件，例如 **/*.ts",""),"prefix",str("只在这个目录下搜",""),"limit",num("最多返回多少条，默认 50",50))),
+   new Tool("search_code","在项目里搜代码。找函数在哪定义、找某个字符串被谁用了，用这个。",obj("query",req(str("要搜索的字符串或正则表达式")),"regex",bool("query 是正则表达式吗，默认 false",false),"ignoreCase",bool("忽略大小写，默认 true",true),"glob",str("只搜匹配这个模式的文件，例如 **/*.ts",""),"prefix",str("只在这个目录下搜",""),"limit",num("最多返回多少条，默认 50，最多 200",50))),
    new Tool("patch_file","改一个文件里的一段。改之前先 read_file 看清上下文，不要凭猜的行号。",obj("path",req(str("文件路径")),"newContent",req(str("替换成的新内容（只这段，不是整个文件）")),"startLine",num("从第几行开始替换（1 起）",1),"endLine",num("替换到第几行（不含），留空表示只改 startLine 那一行"))),
    new Tool("replace_text","在文件里把一段文字换成另一段。旧文字必须在文件里只出现一次，否则会失败。",obj("path",req(str("文件路径")),"oldText",req(str("要被替换的原文（必须在文件里唯一出现）")),"newText",req(str("替换成的新文字")))),
    new Tool("multi_patch","一次改多个文件的多个位置。改多处时用这个，比多次调用 patch_file 快，也不容易改漏。",obj("patches",req(jarr("补丁数组。每项 {path, startLine, endLine, newContent}，startLine 从 1 起，endLine 留空表示只改 startLine 那一行")))),
    new Tool("write_files","新建文件或整体覆盖文件。改整个文件的内容用这个；只改几行用 patch_file。",obj("files",req(jobj("路径到内容的映射，例如 {\"src/a.ts\":\"完整内容\"}")))),
-   new Tool("diff_mine","看这一轮我改了哪些行。写文件之前先自查一遍，确认没有改坏别的地方。",obj()),
+   new Tool("diff_mine","看这一轮我改了哪些行。写文件之前先自查一遍，确认没有改坏别的地方。",obj("path",str("只看这一个文件的差异，留空表示全部",""),"withLines",bool("要不要带具体行差异，默认 true；只看哪些文件变了就传 false",true),"context",num("每段差异上下各留几行上下文，默认 3",3))),
    new Tool("diff_project","对比项目当前内容和某个快照。想知道某次改动前后差了什么时用。",obj("snapshot",str("快照标识，留空就是和上一轮比",""))),
    new Tool("check_project","编译检查整个项目，看有没有语法或引用错误。改完代码一定要调一次。",obj()),
-   new Tool("run_tests","跑项目里的单元测试。测试文件按 *.test.ts / *.spec.js 命名，里面直接用 describe/it/expect。",obj()),
+   new Tool("run_tests","跑项目里的单元测试。测试文件按 *.test.ts / *.spec.js 命名，里面直接用 describe/it/expect。"
+    +"结果里 ok 表示这次验证过没过；项目里没有测试文件时 ok 是 false、ran 是 false，那是没得跑而不是跑挂了。",obj()),
    new Tool("run_script","在沙箱里跑一段 JavaScript，用来算东西或者验证逻辑。不能访问网络和文件系统。",obj("code",req(str("要执行的 JavaScript 代码")))),
    new Tool("run_preview","在真机上预览当前项目。改完想看效果时用。",obj()),
    new Tool("get_debug_reports","拿最近的崩溃日志和报错信息。预览跑出问题时用这个。",obj()),

@@ -76,7 +76,24 @@ final class ScriptRunner {
      if(e==null)continue;
      summary.append("! ").append(e.optString("file","")).append('：').append(e.optString("error")).append('\n');
     }
-    if(r.optInt("files",0)==0)summary.append(r.optString("note","项目里没有测试文件"));
+    /*
+     * 没有测试文件时要说清楚「没跑」，不能只留个空 summary ——
+     * 模型看到空的通过/失败统计，会当成「跑了，零失败」，那就是假阳性了。
+     */
+    if(r.optInt("files",0)==0)summary.append("未运行任何测试。").append(r.optString("note","项目里没有测试文件"));
+    else{
+     summary.append("共 ").append(pass).append(" 个用例通过");
+     if(fail>0)summary.append("、").append(fail).append(" 个失败");
+     summary.append("。");
+    }
+    /*
+     * 明确告诉模型 ok=false 的两种不同含义：
+     * 一个是「有测试但没过」，一个是「压根没有测试可跑」。
+     * 不区分的话，模型会把后者当成前者，然后反复去「修」一个根本没坏的东西。
+     */
+    if(!r.optBoolean("ok",false)&&!r.optBoolean("ran",true)){
+     summary.append("\n注意：这不是测试失败，是项目里没有测试文件。");
+    }
     r.put("summary",summary.toString().trim());
     return r;
    }catch(Exception e){

@@ -36,7 +36,7 @@ if echo "$REPO" | grep -qP '[^\x00-\x7F]'; then
   echo "  [路径] 仓库含非 ASCII 字符，构建副本 -> $SHADOW"
   # 排除构建产物与版本库，只同步构建所需内容
   for item in AndroidManifest.xml runtime-manifest.xml build.sh build-runtime.sh \
-              prepare-local-ai.py res runtime-res assets src shared-src runtime-src vendor; do
+              prepare-local-ai.py res runtime-res assets src shared-src runtime-src vendor tests; do
     [ -e "$REPO/$item" ] && cp -r "$REPO/$item" "$SHADOW/"
   done
   BUILD_ROOT="$SHADOW"
@@ -62,6 +62,33 @@ echo "  keystore  : $KEYW"
 echo
 
 # --- 0. 端侧 AI 依赖 --------------------------------------------------------
+# ---------------------------------------------------------------------------
+# [前置] 自动化测试
+#
+# <p>为什么要放在构建最前面：测试只要几秒，而构建要几分钟。
+# 先跑测试，改坏了当场就知道，不用等构建完再发现问题 ——
+# 「把错误扼杀在摇篮」。
+#
+# <p>这些测试不碰手机、不碰网络：前端渲染逻辑、工具 schema 一致性、
+# 云端传输协议、用量统计拆分。
+#
+# <p>以前测试散在 tests/ 目录，得手动敲命令跑，回归就一直漏。
+# 现在有统一入口，失败会直接中断构建 —— 构建出来的东西一定是测过的。
+# ---------------------------------------------------------------------------
+if [ "${SKIP_TESTS:-0}" != "1" ] && [ -f "tests/run-all.sh" ]; then
+  echo "[前置] 跑自动化测试"
+  # 在影子目录里跑（如果有）：测的是即将被打包的那份代码，不是原目录的旧版本。
+  TEST_DIR="$REPO"
+  if [ -n "${SHADOW:-}" ] && [ -f "$SHADOW/tests/run-all.sh" ]; then TEST_DIR="$SHADOW"; fi
+  if ! (cd "$TEST_DIR" && bash tests/run-all.sh); then
+    echo ""
+    echo "  ✗ 自动化测试没过，构建已中止。"
+    echo "    不想被拦就设 SKIP_TESTS=1，但请先知道自己在跳什么。"
+    exit 1
+  fi
+  echo ""
+fi
+
 echo "[0/6] 准备端侧 AI 依赖（校验 SHA-256）"
 cd "$BUILD_ROOT" && python prepare-local-ai.py
 

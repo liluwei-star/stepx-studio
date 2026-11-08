@@ -44,6 +44,48 @@ final class StreamResponse {
   }
  }
 
+ /**
+  * 试着把一个被截断的 JSON 补全。
+  *
+  * <p>模型输出参数时被 max_tokens 截断，通常只差收尾：
+  * 字符串没闭合、{@code }} 或 {@code ]} 少几个。这些补上去就能解析，
+  * 比让模型整个重发一遍省得多。
+  *
+  * <p>补不回来（比如断在数字中间、断在键名中间）就返回 null，
+  * 由调用方把原文交给模型重发 —— 不要硬猜内容，猜错了更糟。
+  *
+  * @param raw 原始参数文本
+  * @return 补全后的合法 JSON 文本；补不回来时返回 null
+  */
+ static String repairTruncatedJson(String raw){
+  if(raw==null)return null;
+  String s=raw.trim();
+  if(s.isEmpty())return null;
+  StringBuilder sb=new StringBuilder(s);
+  boolean inStr=false,esc=false;
+  int brace=0,bracket=0;
+  for(int i=0;i<sb.length();i++){
+   char c=sb.charAt(i);
+   if(esc){esc=false;continue;}
+   if(c=='\\'){esc=true;continue;}
+   if(c=='"'){inStr=!inStr;continue;}
+   if(inStr)continue;
+   if(c=='{')brace++;
+   else if(c=='}')brace--;
+   else if(c=='[')bracket++;
+   else if(c==']')bracket--;
+  }
+  /* 括号已经配平、字符串也闭合 —— 那本来就不该进这里，交给正常解析。 */
+  if(brace==0&&bracket==0&&!inStr)return null;
+  /* 断在字符串中间：先把引号闭上。 */
+  if(inStr)sb.append('"');
+  /* 断在值后面：补一个 null 不如不补 —— 直接关括号，让解析器判定。 */
+  for(int i=0;i<bracket;i++)sb.append(']');
+  for(int i=0;i<brace;i++)sb.append('}');
+  String fixed=sb.toString();
+  try{new JSONObject(fixed);return fixed;}catch(Exception e){return null;}
+ }
+
  /** 把累积好的分片拼成完整的工具调用列表。 */
  JSONArray collectToolCalls()throws Exception{
   JSONArray out=new JSONArray();
@@ -53,11 +95,43 @@ final class StreamResponse {
    if(name.isEmpty())continue;
    JSONObject args=new JSONObject();
    String rawArgs=slot[2]==null?"":slot[2];
+   /*
+    * 参数解析失败时，<b>绝不能静默变成空对象</b>。
+    *
+    * <p>原来这里是 catch 到异常就 args=new JSONObject()，
+    * 结果模型发出的 {"path":"src/App.tsx" 被截断后变成 {}，
+    * 工具报一句「path 不能为空」，而模型<b>完全不知道是自己的参数坏了</b> ——
+    * 它以为参数发对了，下一轮照原样再发一次，一直重试到 40 轮跑满。
+    * 这是「助手明明能用却总在原地打转」最典型的一种成因。
+    *
+    * <p>所以这里要保留原文和错误信息，交给 DevAgent 原样告诉模型：
+    * 「你上一次的参数不是合法 JSON，原文是这个，请重新输出」。
+    */
+   String argsError=null;
+   boolean argsRepaired=false;
    if(!rawArgs.isEmpty()){
-    try{args=new JSONObject(rawArgs);}catch(Exception e){args=new JSONObject();}
+    try{args=new JSONObject(rawArgs);}
+    catch(Exception e){
+     /*
+      * 先试着补全。模型输出被 max_tokens 截断时，
+      * 最常见的就是少几个 } 或者字符串没闭合 —— 补上就能救回来，
+      * 比让模型整个重发一遍便宜得多。
+      */
+     String fixed=repairTruncatedJson(rawArgs);
+     if(fixed!=null){
+      try{args=new JSONObject(fixed);argsRepaired=true;}
+      catch(Exception e2){args=new JSONObject();argsError=rawArgs;}
+     }else{
+      args=new JSONObject();
+      argsError=rawArgs;
+     }
+    }
    }
-   out.put(new JSONObject().put("id",slot[1]==null||slot[1].isEmpty()?("call_"+i):slot[1])
-    .put("name",name).put("args",args));
+   JSONObject one=new JSONObject().put("id",slot[1]==null||slot[1].isEmpty()?("call_"+i):slot[1])
+    .put("name",name).put("args",args);
+   if(argsError!=null)one.put("argsError",argsError.length()>800?argsError.substring(0,800)+"…":argsError);
+   if(argsRepaired)one.put("argsRepaired",true);
+   out.put(one);
    i++;
   }
   return out;

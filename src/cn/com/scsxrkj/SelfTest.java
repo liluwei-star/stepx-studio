@@ -18,9 +18,18 @@ final class SelfTest {
   if(e instanceof java.net.ConnectException||e instanceof java.net.SocketTimeoutException
     ||e instanceof java.net.UnknownHostException||e instanceof java.io.InterruptedIOException)return true;
   String m=msg==null?"":msg;
+  /*
+   * 外部条件不可用的三种表现：网络挂了、服务商拒绝、**功能没配置**。
+   *
+   * <p>第三种最容易被误判成代码 BUG：绘图没配 API、GitHub 没连 token ——
+   * 工具确实没法干活，但那是环境问题，不是代码写错了。
+   * 把它们混进失败里，自测就会在别人没配这些功能的机器上永远红着。
+   */
   String[] external={"429","402","401","403","500","502","503","504",
    "额度","速率","限流","余额","欠费","配额","超时","timeout","rate limit","quota","insufficient",
-   "Failed to connect","Unable to resolve host","Connection reset","Broken pipe"};
+   "Failed to connect","Unable to resolve host","Connection reset","Broken pipe",
+   "请先添加并选择绘图 API","绘图 API 尚未允许 AI 调用","请保存绘图 API 密钥",
+   "请先填写密钥","密钥格式无效","尚未连接 GitHub","未配置","没有配置"};
   for(String k:external)if(m.toLowerCase().contains(k.toLowerCase()))return true;
   return false;
  }
@@ -55,6 +64,205 @@ final class SelfTest {
   JSONObject project=new JSONObject().put("id","qa-local-tools").put("name","Tool fixture").put("files",new JSONObject().put("index.html","<!doctype html><html><body><h1>fixture</h1></body></html>"));LocalDevTools dev=new LocalDevTools(a,project);
   check(dev.call("list_files",new JSONObject()).getJSONArray("files").length()==1,"project tool lists scoped files");
   check(dev.call("read_file",new JSONObject().put("path","index.html")).getString("content").contains("fixture"),"project tool reads scoped content");
+  /*
+   * 搜索结果必须有上限 —— 源码断言只能证明「代码写了」，
+   * 这里真的调一次，证明运行时确实被限住了。
+   *
+   * <p>造 800 个文件、每个 10 行都含同一个词，
+   * 不传 limit（模型不传是常态），结果必须 ≤ 50 条。
+   */
+  JSONObject bigFiles=new JSONObject();
+  for(int i=0;i<800;i++){
+   StringBuilder sb=new StringBuilder();
+   for(int k=0;k<10;k++)sb.append("const needleValue = ").append(i).append("_").append(k).append(";\n");
+   bigFiles.put("src/f"+i+".js",sb.toString());
+  }
+  JSONObject limProject=new JSONObject().put("id","qa-search-limit").put("name","Search limit").put("files",bigFiles);
+  LocalDevTools bigDev=new LocalDevTools(a,limProject);
+  JSONObject limRes=bigDev.call("search_code",new JSONObject().put("query","needleValue"));
+  check(limRes.getJSONArray("matches").length()<=50,
+   "search results are capped at 50 when the model sends no limit");
+  check(limRes.optBoolean("possiblyMore",false),
+   "search says there may be more matches when it stops at the cap");
+  check(limRes.getJSONArray("matches").length()==50,
+   "the default cap fills up completely instead of truncating early");
+  /*
+   * 模型传一个离谱的大数也不行 —— 硬上限 200。
+   */
+  JSONObject bigRes=bigDev.call("search_code",new JSONObject().put("query","needleValue").put("limit",1000000));
+  check(bigRes.getJSONArray("matches").length()<=200,
+   "an absurd limit from the model is still capped at 200");
+  /*
+   * 列文件同样要有条目上限，且必须说清还剩多少没列。
+   */
+  JSONArray limList=bigDev.call("list_files",new JSONObject()).getJSONArray("files");
+  int limListed=0;boolean limTold=false;
+  for(int i=0;i<limList.length();i++){
+   JSONObject g=limList.optJSONObject(i);
+   if(g==null)continue;
+   /*
+    * 「还有 N 个没列出来」那条是提示分组，不是真实条目 ——
+    * 把它算进去会把总数算成 800，测试就假失败了。
+    */
+   if(g.optString("dir","").startsWith("（还有")){limTold=true;continue;}
+   limListed+=g.optInt("count",0);
+  }
+  check(limListed<=500,
+   "listing files stops at 500 entries");
+  check(limTold,
+   "listing files says how many entries were left out");
+  /*
+   * 原地打转要被拦住 —— 同样是运行时验，不能只靠源码断言。
+   *
+   * <p>连续三次读同一个文件：前两次正常返回全文，
+   * 第三次必须变成 unchanged（不重复贴），否则大文件能把一轮预算贴光。
+   */
+  JSONObject repProject=new JSONObject().put("id","qa-repeat").put("name","Repeat guard")
+   .put("files",new JSONObject().put("README.md","# 原文"));
+  LocalDevTools repDev=new LocalDevTools(a,repProject);
+  JSONObject repArgs=new JSONObject().put("path","README.md");
+  JSONObject rep1=repDev.callOnce("read_file",repArgs);
+  check(!rep1.optBoolean("unchanged",false),
+   "the first read returns the content as usual");
+  JSONObject rep2=repDev.callOnce("read_file",repArgs);
+  check(!rep2.optBoolean("unchanged",false)&&rep2.has("repeatHint"),
+   "the second read still returns content but warns about the repeat");
+  JSONObject rep3=repDev.callOnce("read_file",repArgs);
+  check(rep3.optBoolean("unchanged",false),
+   "the third identical read says unchanged instead of pasting it again");
+  check(!rep3.has("content"),
+   "the repeated read no longer carries the whole file");
+  /*
+   * 文件变了就一定要重新给 —— 改完再读是正常行为，不能误伤。
+   */
+  repDev.staged.getJSONObject("files").put("README.md","# 改过了");
+  JSONObject rep4=repDev.callOnce("read_file",repArgs);
+  check(!rep4.optBoolean("unchanged",false)&&rep4.optString("content","").contains("改过了"),
+   "reading again after the file changed returns the new content");
+  /*
+   * 空回复兜底 —— 模型不写字时用户也得看到发生了什么。
+   */
+  JSONObject sumRes=new JSONObject().put("stagedFiles",new JSONObject().put("src/a.ts","x").put("src/b.ts","y"));
+  String sumText=DevAgent.summaryText(sumRes,new JSONArray());
+  check(sumText.contains("2 个文件")&&sumText.contains("src/a.ts"),
+   "an empty reply is filled with the files that changed");
+  JSONObject sumRes2=new JSONObject();
+  check(DevAgent.summaryText(sumRes2,new JSONArray()).contains("没有改动文件"),
+   "an empty reply with no changes says so");
+  JSONArray sumTrail=new JSONArray().put(new JSONObject().put("name","read_file").put("error","没有这个文件：x.ts"));
+  String sumText3=DevAgent.summaryText(sumRes2,sumTrail);
+  check(sumText3.contains("次工具调用出错")&&sumText3.contains("没有这个文件"),
+   "an empty reply with failed tools names the last error");
+  JSONArray sumTrail2=new JSONArray().put(new JSONObject().put("name","auto_check_project")
+   .put("result",new JSONObject().put("ok",false).put("error","TS2304")));
+  check(DevAgent.summaryText(new JSONObject(),sumTrail2).contains("编译检查没通过"),
+   "an empty reply after a failed compile says it did not pass");
+  /*
+   * 纯问答不该报错 —— 先验它依赖的两个前提。
+   *
+   * <p>前提一：自然语言解析不出 files（所以以前必然抛）。
+   * <p>前提二：空改动 apply 回去不抛、结果和原来一样（所以现在能安全走这条路）。
+   */
+  boolean proseRejected=false;
+  try{ProjectEdits.parse("这个项目有 4 个文件，是一个静态页面。");}
+  catch(Exception e){proseRejected=true;}
+  check(proseRejected,
+   "plain prose is not mistaken for a file change");
+  JSONObject emptyBase=new JSONObject().put("index.html","<html></html>");
+  JSONObject emptyApplied=ProjectEdits.apply(new JSONObject().put("files",new JSONObject(emptyBase.toString())),
+   emptyBase,new JSONObject(),"AI 助手");
+  check(ProjectEdits.same(emptyBase,emptyApplied.getJSONObject("files")),
+   "applying an empty change set leaves the project untouched instead of throwing");
+  /*
+   * 读文件越界的两种表现 —— 都要说清楚，不能给空内容。
+   */
+  LocalDevTools rrDev=new LocalDevTools(a,new JSONObject().put("id","qa-read").put("name","Read range")
+   .put("files",new JSONObject().put("a.js","l1\nl2\nl3\nl4\nl5")));
+  boolean rrThrew=false;
+  try{rrDev.call("read_file",new JSONObject().put("path","a.js").put("startLine",99));}
+  catch(Exception e){rrThrew=e.getMessage()!=null&&e.getMessage().contains("一共 5 行");}
+  check(rrThrew,
+   "reading past the end throws with the real line count");
+  JSONObject rrPart=rrDev.call("read_file",new JSONObject().put("path","a.js").put("startLine",2).put("lineCount",2));
+  check(rrPart.optInt("returnedLines",0)==2,
+   "a partial read reports how many lines came back");
+  check(rrPart.optString("note","").contains("后面还有 2 行"),
+   "a partial read says how many lines are left");
+  check(rrPart.optString("note","").contains("startLine=4"),
+   "a partial read says exactly where to continue");
+  /*
+   * 只改一行 —— 这条以前必然失败（不传 endLine 就抛行号范围无效）。
+   */
+  LocalDevTools ppDev=new LocalDevTools(a,new JSONObject().put("id","qa-patch").put("name","Patch one line")
+   .put("files",new JSONObject().put("index.html","<html></html>").put("a.js","one\ntwo\nthree")));
+  ppDev.call("patch_file",new JSONObject().put("path","a.js").put("startLine",2).put("newContent","TWO"));
+  check(ppDev.staged.getJSONObject("files").getString("a.js").equals("one\nTWO\nthree"),
+   "patching a single line without endLine replaces exactly that line");
+  /*
+   * endLine 不含：startLine=2 endLine=3 只换第 2 行。
+   */
+  LocalDevTools ppDev2=new LocalDevTools(a,new JSONObject().put("id","qa-patch2").put("name","Patch range")
+   .put("files",new JSONObject().put("index.html","<html></html>").put("a.js","one\ntwo\nthree")));
+  ppDev2.call("patch_file",new JSONObject().put("path","a.js").put("startLine",2).put("endLine",3).put("newContent","TWO"));
+  check(ppDev2.staged.getJSONObject("files").getString("a.js").equals("one\nTWO\nthree"),
+   "endLine stays exclusive, so endLine=3 still replaces only line 2 and keeps line 3");
+  /* endLine == startLine 也要能用（模型常把它当「含」写）。 */
+  LocalDevTools ppDev3=new LocalDevTools(a,new JSONObject().put("id","qa-patch3").put("name","Patch same line")
+   .put("files",new JSONObject().put("index.html","<html></html>").put("a.js","one\ntwo\nthree")));
+  JSONObject pp3=ppDev3.call("patch_file",new JSONObject().put("path","a.js")
+   .put("startLine",2).put("endLine",2).put("newContent","TWO"));
+  check(ppDev3.staged.getJSONObject("files").getString("a.js").equals("one\nTWO\nthree"),
+   "endLine equal to startLine is treated as a single-line change");
+  JSONObject pp3r=pp3.optJSONObject("result");
+  check(pp3r!=null&&pp3r.optInt("replacedFrom",0)==2&&pp3r.optInt("replacedTo",0)==2,
+   "the result reports exactly which lines were replaced");
+  /*
+   * 记忆用量真的要出现在提示词里 —— 提示词承诺过这件事。
+   *
+   * <p>只在<b>自测专用</b>的 project scope 里写，写完立刻清掉。
+   * 绝不碰 global —— 那是用户真正的记忆，自测没有资格动它。
+   */
+  String muScope="qa-memory-usage";
+  a.memory.replace("测试用量：这条是自测写的","project",muScope);
+  String muNow=a.memory.usageFor(muScope);
+  check(muNow.contains("记忆用量")&&muNow.contains("/"+AiMemory.PROJECT_CAP),
+   "after writing memory the usage line carries real numbers");
+  a.memory.clear("project",muScope);
+  /*
+   * 计划全部完成时要明说，别让模型回头把做完的事再做一遍。
+   */
+  String planId="qa-plan-done";
+  a.upsert("projects",new JSONObject().put("id",planId).put("name","Plan QA")
+   .put("files",new JSONObject().put("index.html","<html></html>")));
+  a.savePlan(planId,new JSONArray().put(new JSONObject().put("text","第一步").put("done",true))
+   .put(new JSONObject().put("text","第二步").put("done",true)));
+  String planDoneText=DevAgent.planContext(a,planId);
+  check(planDoneText.contains("已全部完成"),
+   "a finished plan says it is finished");
+  check(planDoneText.contains("不是新任务"),
+   "a finished plan is not treated as a fresh task");
+  a.savePlan(planId,new JSONArray().put(new JSONObject().put("text","第一步").put("done",true))
+   .put(new JSONObject().put("text","第二步").put("done",false)));
+  check(DevAgent.planContext(a,planId).contains("接着做没勾的那几项"),
+   "an unfinished plan tells the model to keep going");
+  check(a.memory.usageFor(muScope).indexOf("记忆用量")<0
+    ||!a.memory.usageFor(muScope).contains("本项目"),
+   "clearing the test scope removes it from the usage line");
+  /*
+   * multi_patch 从后往前改 —— 前面插行不能把后面的行号顶掉。
+   *
+   * 第 2 行插入两行、同时改第 2 行之外的第 4 行（原文件）。
+   * 如果按升序改，插完两行后原第 4 行已是第 6 行，就改错了地方。
+   */
+  LocalDevTools mpDev=new LocalDevTools(a,new JSONObject().put("id","qa-multi").put("name","Multi patch")
+   .put("files",new JSONObject().put("index.html","<html></html>")
+    .put("a.js","l1\nl2\nl3\nl4\nl5")));
+  JSONArray mpPatches=new JSONArray()
+   .put(new JSONObject().put("path","a.js").put("startLine",2).put("newContent","X2\nX2b"))
+   .put(new JSONObject().put("path","a.js").put("startLine",4).put("newContent","X4"));
+  mpDev.call("multi_patch",new JSONObject().put("patches",mpPatches));
+  check(mpDev.staged.getJSONObject("files").getString("a.js").equals("l1\nX2\nX2b\nl3\nX4\nl5"),
+   "multi_patch applies from the bottom up so earlier inserts cannot shift later line numbers");
   check(dev.call("search_code",new JSONObject().put("query","fixture")).getJSONArray("matches").length()==1,"project tool searches line numbers");
   dev.call("write_files",new JSONObject().put("files",new JSONObject().put("app.js","let count=0;")));check(!project.getJSONObject("files").has("app.js")&&dev.finalChanges(new JSONObject()).getString("app.js").contains("count"),"tool stages new files without overwriting original");
   try{dev.call("write_files",new JSONObject().put("files",new JSONObject().put("../escape.js","bad")));throw new Exception("accepted traversal");}catch(Exception e){check(!e.getMessage().equals("accepted traversal"),"tool write rejects directory escape");}
@@ -76,6 +284,43 @@ final class SelfTest {
   patches.put(new JSONObject().put("path","index.html").put("startLine",1).put("endLine",1).put("newContent","<!doctype html><html><body><h1>patched</h1></body></html>"));
   JSONObject multi=dev.call("multi_patch",new JSONObject().put("patches",patches));
   check(multi.getInt("ok")==2&&dev.finalChanges(new JSONObject()).getString("index.html").contains("patched"),"multi_patch edits several files in one call");
+  /*
+   * 审查链路的原生断言。
+   *
+   * <p>这里守的是一个真实踩过的坑：edit.base 是「改动前的整个项目」，几 MB；
+   * edit.files 是「这次改了什么」，审查页面全靠它。以前保存聊天消息时用
+   * 摘要方法把 files 换成了 changedFiles —— 审查页于是是空的，
+   * 而且时好时坏（刚回复完能审，state 刷新后就废）。
+   */
+  JSONObject editProbe=new JSONObject()
+   .put("status","review").put("message","建议已生成").put("projectId","p1")
+   .put("base",new JSONObject().put("index.html","旧内容"))
+   .put("files",new JSONObject().put("index.html","新内容"));
+  JSONObject editStored=a.editForStore(editProbe);
+  check(editStored.has("files"),"the stored edit keeps the changed files for review");
+  check(editStored.getJSONObject("files").optString("index.html").equals("新内容"),"the stored edit keeps the new file content");
+  check(!editStored.has("base"),"the stored edit drops the whole-project baseline");
+  check(editStored.has("baseHash"),"the stored edit records the baseline hash instead");
+  check(editStored.has("changedFiles"),"the stored edit lists the changed file names");
+  /*
+   * 幂等检查要按「键和值」比，不能比字符串：
+   * org.json 的 JSONObject 用 LinkedHashMap，toString 按插入顺序输出，
+   * 两次处理后的插入顺序会不同（files 的位置变了），字符串就不相等了 ——
+   * 但内容完全一样。拿字符串比会误判成 BUG。
+   */
+  JSONObject editTwice=a.editForStore(editStored);
+  boolean sameKeys=editTwice.length()==editStored.length();
+  if(sameKeys)for(java.util.Iterator<String> it=editStored.keys();it.hasNext();){
+   String k=it.next();
+   if(!editTwice.has(k)||!String.valueOf(editTwice.opt(k)).equals(String.valueOf(editStored.opt(k))))sameKeys=false;
+  }
+  check(sameKeys,"storing the edit twice keeps the same content");
+  JSONObject hugeEdit=new JSONObject().put("files",new JSONObject().put("big.js",new String(new char[600*1024]).replace('\0','x')));
+  JSONObject hugeStored=a.editForStore(hugeEdit);
+  check(hugeStored.optBoolean("filesOmitted",false),"an oversized change is marked as omitted instead of kept whole");
+  check(!hugeStored.has("files"),"an oversized change does not keep the full content");
+  check(hugeStored.has("changedFiles"),"an oversized change still lists the changed file names");
+  check(!a.editForUi(editProbe).has("base"),"the edit sent to the web view drops the baseline");
 
   JSONObject mine=dev.call("diff_mine",new JSONObject()).getJSONObject("diff");
   check(mine.getJSONObject("stats").getInt("modified")>=1&&mine.getJSONArray("modified").length()>=1,"diff_mine reports what changed this round");
@@ -293,6 +538,20 @@ final class SelfTest {
     .put("files",new JSONObject().put("index.html","<!doctype html><html></html>")));
    check(noTests.optInt("files",0)==0&&noTests.optString("note").contains("没有测试文件"),
     "test runner explains when a project has no tests");
+   /*
+    * 「没有测试」不能报成「测试通过」。
+    *
+    * <p>原来这里 ok 是 true，模型看到就会说「测试通过了」——
+    * 而一个用例都没跑。这是假阳性，比明确报错更糟。
+    */
+   check(!noTests.optBoolean("ok",true),
+    "a project with no tests is not reported as a passing run");
+   check(!noTests.optBoolean("ran",true),
+    "a project with no tests is marked as not-run");
+   check(noTests.optString("summary","").contains("未运行任何测试"),
+    "the summary says nothing was run");
+   check(noTests.optString("summary","").contains("不是测试失败"),
+    "the summary tells the model this is not a failure to fix");
   }catch(Exception e){
    throw new Exception("FAIL test runner explains when a project has no tests: "+e.getMessage());
   }
@@ -301,6 +560,10 @@ final class SelfTest {
    JSONObject tested=a.script.runTests(sandboxProject);
    check(tested.optInt("files",0)==1&&tested.optInt("passed",-1)==1&&tested.optInt("failed",-1)==1,
     "test runner bundles tests, runs them, and counts pass and fail");
+   check(tested.optBoolean("ran",false),
+    "a real test run is marked as run");
+   check(!tested.optBoolean("ok",true),
+    "a run with a failing case is not reported as ok");
    check(tested.optString("summary","").contains("故意失败的一条"),
     "test runner reports the failing case by name");
   }catch(Exception e){
@@ -423,6 +686,32 @@ final class SelfTest {
   check(plainTextRejected,"parse rejects a plain prose answer");
 
   /*
+   * ── 降级路径：区分「工具协议」和「正文里讲 JSON」────────────
+   *
+   * <p>降级路径靠从正文里抠 JSON 来执行工具。但「抠得出 JSON」不等于
+   * 「这是工具协议」—— 用户问「JSON 怎么写」，模型的回答里必然有花括号。
+   * 于是真实问题有两个：
+   *
+   * <p>① 解析成功但里面没有 tools/files/answer → 用户的示例被当成指令执行；
+   * <p>② 解析失败且文本里有 { → 正确答案被判成格式错误，
+   *    触发重试，最后用户只看到「模型返回的内容无法解析」。
+   *
+   * <p>正确判据是「整段文本是不是一个 JSON 对象」。
+   */
+  check(DevAgent.isProtocolBody(new JSONObject().put("tools",new JSONArray())),"a tools body is a protocol body");
+  check(DevAgent.isProtocolBody(new JSONObject().put("files",new JSONObject())),"a files body is a protocol body");
+  check(DevAgent.isProtocolBody(new JSONObject().put("answer","好")),"an answer body is a protocol body");
+  check(!DevAgent.isProtocolBody(new JSONObject().put("name","张三")),"an ordinary object is not a protocol body");
+  check(!DevAgent.isProtocolBody(null),"null is not a protocol body");
+  check(DevAgent.looksLikeProtocolText("{\"tools\":[{\"name\":\"list_files\"}]}"),"a whole-json tool request looks like a protocol");
+  check(DevAgent.looksLikeProtocolText("{\"files\":{\"index.html\":\"x\"}}"),"a whole-json file request looks like a protocol");
+  check(DevAgent.looksLikeProtocolText("{\"tools\":["),"a broken whole-json request still looks like a protocol");
+  check(!DevAgent.looksLikeProtocolText("JSON 对象用花括号包起来，比如 {\"name\":\"张三\"}。"),"a prose answer about json is not a protocol");
+  check(!DevAgent.looksLikeProtocolText("按钮样式这样写：\\n.button { color: red; }"),"a css answer is not a protocol");
+  check(!DevAgent.looksLikeProtocolText("项目里有 3 个文件。"),"a plain prose answer is not a protocol");
+  check(!DevAgent.looksLikeProtocolText("可以这样写：\\n```js\\nconst o = {a:1};\\n```"),"a fenced code answer is not a protocol");
+
+  /*
    * ── 计划工具 ──────────────────────────────────────────────
    *
    * 计划必须跨轮保留，而且不能混进用户的文件列表 ——
@@ -467,6 +756,364 @@ final class SelfTest {
   boolean emptyPlanRejected=false;
   try{planTools.setPlan(planProject,new JSONArray());}catch(Exception e){emptyPlanRejected=true;}
   check(emptyPlanRejected,"an empty plan is rejected");
+
+  /*
+   * ── 全工具冒烟：每个工具至少能被调起来 ─────────────────────
+   *
+   * <p>以前的自测只覆盖了文件类工具。记忆、技能、联网、GitHub、图片、
+   * 脚本、构建这些 —— 全是 AGENT 的看家本领，却一个都没被真正调过。
+   * 于是「工具有没有、参数对不对、返回结构像不像」只能靠读代码猜。
+   *
+   * <p>这一组把 schema 里的每个工具都真的调一次：
+   * ① 不抛异常（外部条件受限的除外 —— 断网、没配 GitHub token 这类）；
+   * ② 返回值不是 null。
+   *
+   * <p><b>用完必须清理：</b>技能、记忆、项目、计划都会落到真实存储里，
+   * 不清就会污染用户自己的数据。
+   */
+  String smokeProjectId="qa-smoke";
+  String smokeSkillName="qa-smoke-skill";
+  try{
+   a.upsert("projects",new JSONObject().put("id",smokeProjectId).put("name","冒烟自测")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body><h1>smoke</h1></body></html>")
+     .put("app.js","function hello(){return 1;}\n"))
+    .put("created",System.currentTimeMillis()));
+   LocalDevTools smoke=new LocalDevTools(a,a.byId("projects",smokeProjectId));
+   JSONArray smokeCalls=new JSONArray()
+    /*
+     * 记忆一律用 project scope 写。
+     *
+     * <p>全局记忆是**用户自己的数据**（files/ai-memory.md）。
+     * 自测如果往里写、或者调 clear("global") 去清，
+     * 就等于把用户攒下来的经验抹了 —— 这比测试失败严重得多。
+     * 写进项目范围，测完删掉那个文件，用户的全局记忆一点不碰。
+     */
+    .put(new JSONObject().put("name","remember").put("args",new JSONObject().put("text","冒烟测试记忆").put("scope","project")))
+    .put(new JSONObject().put("name","read_memory").put("args",new JSONObject().put("scope","project")))
+    .put(new JSONObject().put("name","update_memory").put("args",new JSONObject().put("content","冒烟测试记忆").put("scope","project")))
+    .put(new JSONObject().put("name","list_skills").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","write_skill").put("args",new JSONObject().put("name",smokeSkillName).put("description","冒烟测试用").put("content","冒烟测试技能正文")))
+    .put(new JSONObject().put("name","read_skill").put("args",new JSONObject().put("name",smokeSkillName)))
+    .put(new JSONObject().put("name","delete_skill").put("args",new JSONObject().put("name",smokeSkillName)))
+    .put(new JSONObject().put("name","list_files").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","read_file").put("args",new JSONObject().put("path","index.html")))
+    .put(new JSONObject().put("name","search_code").put("args",new JSONObject().put("query","smoke")))
+    .put(new JSONObject().put("name","replace_text").put("args",new JSONObject().put("path","index.html").put("oldText","smoke").put("newText","smoke2")))
+    .put(new JSONObject().put("name","patch_file").put("args",new JSONObject().put("path","app.js").put("startLine",1).put("endLine",1).put("newContent","function hello(){return 2;}")))
+    .put(new JSONObject().put("name","multi_patch").put("args",new JSONObject().put("patches",new JSONArray().put(new JSONObject().put("path","app.js").put("startLine",1).put("endLine",1).put("newContent","function hello(){return 3;}")))))
+    .put(new JSONObject().put("name","diff_mine").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","diff_project").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","write_files").put("args",new JSONObject().put("files",new JSONObject().put("new.txt","hello"))))
+    .put(new JSONObject().put("name","check_project").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","get_debug_reports").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","run_tests").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","run_script").put("args",new JSONObject().put("code","window.__neoResult=1+1;")))
+    .put(new JSONObject().put("name","inspect_project").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","list_art_models").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","generate_image").put("args",new JSONObject().put("prompt","一只橘猫").put("path","cat.png")))
+    .put(new JSONObject().put("name","list_assets").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","github_status").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","search_connectors").put("args",new JSONObject().put("query","ic_atomic_990012")))
+    .put(new JSONObject().put("name","describe_connector").put("args",new JSONObject().put("id","ic_atomic_990012")))
+    .put(new JSONObject().put("name","web_fetch").put("args",new JSONObject().put("url","https://example.com")))
+    .put(new JSONObject().put("name","web_search").put("args",new JSONObject().put("query","hermes agent")))
+    .put(new JSONObject().put("name","write_plan").put("args",new JSONObject().put("steps",new JSONArray().put(new JSONObject().put("text","冒烟一步").put("done",false)))))
+    .put(new JSONObject().put("name","read_plan").put("args",new JSONObject()));
+   /*
+    * 三个工具不能在这里真跑：build_apk 要几分钟，run_preview 会弹窗打断自测，
+    * github_push 会真的推仓库。它们改用「参数校验路径」验证 ——
+    * 至少确认入口活着、参数校验会给出说得清楚的错，而不是崩掉。
+    */
+   JSONArray smokeCalls2=new JSONArray()
+    .put(new JSONObject().put("name","build_apk").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","github_push").put("args",new JSONObject()))
+    .put(new JSONObject().put("name","run_preview").put("args",new JSONObject()));
+   JSONArray smokeBad=new JSONArray();JSONArray smokeSkipped=new JSONArray();
+   for(int i=0;i<smokeCalls.length();i++){
+    JSONObject c=smokeCalls.optJSONObject(i);
+    String toolName=c.optString("name");
+    try{
+     JSONObject smokeResult=smoke.call(toolName,c.optJSONObject("args"));
+     if(smokeResult==null)smokeBad.put(toolName+" 返回了 null");
+    }catch(Exception e){
+     String msg=e.getMessage()==null?"":e.getMessage();
+     /* 外部条件不可用不算代码问题 */
+     if(isExternalBlocker(e,msg)){smokeSkipped.put(toolName+"："+shortReason(msg));continue;}
+     smokeBad.put(toolName+"："+msg);
+    }
+   }
+   /*
+    * 这三个**只计入覆盖，不实际调用**：
+    * build_apk 真构建要几分钟，run_preview 会弹窗打断自测，
+    * github_push 会真的往用户仓库推东西。
+    * 它们的真实行为另在真机上手工验证。
+    */
+   /*
+    * 以后新增工具却忘了加进冒烟列表，这里会立刻发现 ——
+    * 工具列表是照着 schema 长出来的，schema 加了就是新工具。
+    */
+   JSONArray schemaNames=new JSONArray();
+   for(ToolSchema.Tool st:ToolSchema.all())schemaNames.put(st.name);
+   JSONArray smokeNames=new JSONArray();
+   for(int i=0;i<smokeCalls.length();i++)smokeNames.put(smokeCalls.optJSONObject(i).optString("name"));
+   for(int i=0;i<smokeCalls2.length();i++)smokeNames.put(smokeCalls2.optJSONObject(i).optString("name"));
+   JSONArray notSmoked=new JSONArray();
+   for(int i=0;i<schemaNames.length();i++){
+    String sn=schemaNames.optString(i,"");
+    boolean covered=false;
+    for(int j=0;j<smokeNames.length();j++)if(sn.equals(smokeNames.optString(j,""))){covered=true;break;}
+    if(!covered)notSmoked.put(sn);
+   }
+   check(notSmoked.length()==0,"every schema tool is covered by the smoke test [missing="+notSmoked+"]");
+   check(smokeBad.length()==0,"every tool can be called without crashing [bad="+smokeBad+" skipped="+smokeSkipped+"]");
+   /*
+    * 计划要能被读回来 —— 单独确认，不靠上面的「没抛异常」蒙混。
+    */
+   check(smoke.call("read_plan",new JSONObject()).optJSONArray("steps").length()==1,"the smoke plan is readable");
+   /*
+    * ── 失败恢复：错误消息要能让模型自我纠正 ──────────────
+    *
+    * <p>这三段验证的是**运行时真实行为**，不是源码里有没有那句话。
+    * 模型出错的时候拿到什么，比代码里写了什么更要紧。
+    */
+   try{
+    smoke.call("no_such_tool_at_all",new JSONObject());
+    check(false,"an unknown tool name is rejected");
+   }catch(Exception e){
+    String msg=e.getMessage()==null?"":e.getMessage();
+    check(msg.contains("可用工具")&&msg.contains("list_files"),
+     "an unknown tool name tells the model which tools exist [msg="+msg.substring(0,Math.min(120,msg.length()))+"]");
+   }
+   try{
+    smoke.call("read_file",new JSONObject().put("path","nope/missing.js"));
+    check(false,"a missing file is rejected");
+   }catch(Exception e){
+    String msg=e.getMessage()==null?"":e.getMessage();
+    check(msg.contains("文件不存在")&&msg.contains("index.html"),
+     "a missing file tells the model which files exist [msg="+msg.substring(0,Math.min(120,msg.length()))+"]");
+   }
+   /*
+    * ── 上下文裁剪：协议配对不能破 ────────────────────
+    *
+    * <p>这是真机上的 Java 实现，不是 JS 参考版本。
+    * 两边必须一致 —— 参考版本错了，Java 对了也说明不了问题。
+    */
+   JSONArray longHistory=new JSONArray();
+   longHistory.put(new JSONObject().put("role","user").put("content","原始任务"));
+   for(int i=0;i<30;i++){
+    String id="call_"+i;
+    longHistory.put(new JSONObject().put("role","assistant").put("content","我来查一下")
+     .put("tool_calls",new JSONArray().put(new JSONObject().put("id",id).put("type","function")
+      .put("function",new JSONObject().put("name","read_file").put("arguments","{}")))));
+    longHistory.put(new JSONObject().put("role","tool").put("tool_call_id",id)
+     .put("content","文件内容 ".repeat(2000)+i));
+   }
+   JSONArray trimmed=DevAgent.trimToolHistory(longHistory,200*1024);
+   check(trimmed.length()<longHistory.length(),"a long tool history is trimmed");
+   check(trimmed.length()>0&&"原始任务".equals(trimmed.optJSONObject(0).optString("content","")),
+    "the original request survives the trim");
+   /* 每条 tool 消息都必须有配对的 assistant tool_calls */
+   JSONArray callIds=new JSONArray();
+   for(int i=0;i<trimmed.length();i++){
+    JSONObject m=trimmed.optJSONObject(i);
+    if(m==null)continue;
+    JSONArray tc=m.optJSONArray("tool_calls");
+    if(tc!=null)for(int c=0;c<tc.length();c++)callIds.put(tc.optJSONObject(c).optString("id"));
+   }
+   int orphaned=0;
+   for(int i=0;i<trimmed.length();i++){
+    JSONObject m=trimmed.optJSONObject(i);
+    if(m==null)continue;
+    if("tool".equals(m.optString("role",""))){
+     String id=m.optString("tool_call_id","");
+     boolean found=false;
+     for(int c=0;c<callIds.length();c++)if(id.equals(callIds.optString(c,""))){found=true;break;}
+     if(!found)orphaned++;
+    }
+   }
+   check(orphaned==0,"every tool message still has its paired tool_calls after the trim");
+   boolean hasNote=false;
+   for(int i=0;i<trimmed.length();i++){
+    JSONObject m=trimmed.optJSONObject(i);
+    if(m!=null&&"user".equals(m.optString("role",""))&&m.optString("content","").contains("已从上下文中移除")){hasNote=true;break;}
+   }
+   check(hasNote,"the trim tells the model what was dropped");
+   /*
+    * ── 项目概览真的进了系统提示词 ─────────────────────
+    *
+    * <p>这一条只能在真机上验：概览是拼进 system 提示词的，
+    * 源码断言只能证明「代码写了」，证明不了「真的发出去了」。
+    *
+    * <p>做法：连本地 fixture，它检查收到的 system 里有没有「【当前项目】」——
+    * 有就把概览原样带进回答，没有就回一个 OVERVIEW_MISSING。
+    * 于是「回答里出现了真实文件数」就等于「概览进了提示词」。
+    *
+    * <p>fixture 连不上时算跳过，不是失败 —— 它是外部条件。
+    */
+   try{
+    JSONObject ovProject=new JSONObject().put("id","qa-ov-e2e").put("name","概览测试")
+     .put("files",new JSONObject()
+      .put("index.html","<!doctype html><html><body>hi</body></html>")
+      .put("src/main.js","console.log(1)")
+      .put("src/util.js","export const a=1")
+      .put("README.md","# 概览测试"));
+    a.upsert("projects",ovProject);
+    JSONArray ovMessages=new JSONArray().put(new JSONObject().put("role","user").put("content","这个项目有多少个文件？"));
+    ApiClient ovClient=new ApiClient();
+    ovClient.progress=null;
+    JSONObject ovProfile=new JSONObject().put("endpoint","http://127.0.0.1:8770/v1")
+     .put("protocol","compatible").put("model","overview-probe")
+     .put("maxTokens",512).put("id","qa-ov-profile").put("streaming",false);
+    JSONObject ovResult=DevAgent.run(a,ovClient,ovProfile,"fixture-secret",ovMessages,"system",ovProject,true);
+    String ovText=ovResult.optString("text","");
+    check(ovText.contains("OVERVIEW_OK"),
+     "the project overview reaches the model's system prompt");
+    check(ovText.contains("4 个文件"),
+     "the model can state the real file count without calling a tool");
+    check(ovResult.optJSONArray("toolCalls")==null||ovResult.optJSONArray("toolCalls").length()==0,
+     "answering a question needs no tool call");
+   }catch(Exception e){
+    /*
+     * fixture 连不上是外部条件，不是代码问题 —— 跳过，不算失败。
+     * 但「概览没进提示词」是代码问题，必须报出来。
+     */
+    if(!isExternalBlocker(e,e.getMessage()))throw new Exception("FAIL project overview reaches the prompt: "+e.getMessage());
+   }
+
+   /*
+    * ── 跑满轮数不该把做好的活丢掉 ─────────────────────
+    *
+    * <p>原来 cancelled 和 incomplete 一起丢。incomplete 也包括「跑满 40 轮」，
+    * 那种情况下前面几十轮改的文件全白改。
+    */
+   check(MainActivity.shouldRejectWrite(false,false)==false,
+    "a completed round keeps its changes");
+   check(MainActivity.shouldRejectWrite(true,false)==true,
+    "an explicit cancel drops the changes");
+   check(MainActivity.shouldRejectWrite(false,true)==false,
+    "a round that hit the tool-call cap keeps its changes");
+   check(MainActivity.shouldRejectWrite(true,true)==true,
+    "an explicit cancel drops the changes even when the round was cut short");
+
+   /*
+    * ── 项目概览必须是真的 ─────────────────────────
+    *
+    * <p>提示词教模型「第一句就说有 N 个文件」——
+    * 那 N 必须来自真实项目，不能是编的。
+    */
+   JSONObject ovProject=new JSONObject().put("id","qa-overview").put("name","测试项目")
+    .put("files",new JSONObject()
+     .put("index.html","<!doctype html><html><body>hi</body></html>")
+     .put("src/main.js","console.log(1)")
+     .put("src/util.js","export default 1")
+     .put("README.md","# 测试"));
+   String ov=LocalDevTools.overview(ovProject);
+   check(ov.contains("4 个文件"),"the overview states the real file count");
+   check(ov.contains("index.html"),"the overview names the entry file");
+   check(ov.contains("src"),"the overview describes the top-level layout");
+   check(!ov.contains("318"),"the overview does not carry a made-up number");
+   check(LocalDevTools.overview(null).isEmpty(),"no project means no overview");
+   JSONObject emptyOv=new JSONObject().put("id","qa-empty").put("files",new JSONObject());
+   check(LocalDevTools.overview(emptyOv).contains("空的"),"an empty project says so");
+
+   /*
+    * ── 路径规则只有一份 ─────────────────────────────
+    *
+    * <p>本地和云端各写各的路径规则时，会出现「本地能存、云端不能」，
+    * 用户看到的只是「同步不包含此路径」—— 不知道是哪个文件、为什么。
+    *
+    * <p>这里直接拿云端那套标准去卡本轮改动。
+    */
+   JSONObject pathProject=new JSONObject().put("id","qa-path")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body>hi</body></html>"));
+   boolean rejectedEmptySegment=false;
+   try{
+    JSONObject bad=new JSONObject().put("a//b.html","x");
+    ProjectEdits.apply(pathProject,pathProject.getJSONObject("files"),bad,"路径测试");
+   }catch(Exception e){rejectedEmptySegment=true;}
+   check(rejectedEmptySegment,"a path with an empty segment is rejected");
+   boolean rejectedDotDot=false;
+   try{
+    JSONObject bad=new JSONObject().put("../evil.html","x");
+    ProjectEdits.apply(pathProject,pathProject.getJSONObject("files"),bad,"路径测试");
+   }catch(Exception e){rejectedDotDot=true;}
+   check(rejectedDotDot,"a path that climbs out is rejected");
+   boolean rejectedAbsolute=false;
+   try{
+    JSONObject bad=new JSONObject().put("/etc/passwd","x");
+    ProjectEdits.apply(pathProject,pathProject.getJSONObject("files"),bad,"路径测试");
+   }catch(Exception e){rejectedAbsolute=true;}
+   check(rejectedAbsolute,"an absolute path is rejected");
+   boolean acceptedNormal=false;
+   try{
+    JSONObject good=new JSONObject().put("src/app/main.js","console.log(1)");
+    ProjectEdits.apply(pathProject,pathProject.getJSONObject("files"),good,"路径测试");
+    acceptedNormal=true;
+   }catch(Exception e){}
+   check(acceptedNormal,"a normal path is accepted");
+
+   /*
+    * ── 编译检查：警告必须被区分对待 ──────────────────
+    *
+    * <p>「编译通过」不等于「项目是好的」。这里用真实编译跑一遍，
+    * 验证环境提示不会让检查失败、但也不会被藏起来。
+    */
+   JSONObject plainProject=new JSONObject().put("id","qa-compile")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body><h1>hi</h1></body></html>"));
+   JSONObject plainCheck=LocalCompiler.check(a,plainProject);
+   check(plainCheck.optBoolean("ok",false),"a clean project passes the compile check");
+   check(plainCheck.optJSONArray("warnings")!=null,"the compile check always returns a warnings array");
+   /*
+    * 带 vite.config.ts 的项目会有一条「未执行 Vite 插件」的提示。
+    * 这是环境限制，不是代码坏了 —— 检查该通过，但要看得见这条提示。
+    */
+   JSONObject viteProject=new JSONObject().put("id","qa-vite")
+    .put("files",new JSONObject()
+     .put("index.html","<!doctype html><html><body><h1>hi</h1></body></html>")
+     .put("vite.config.ts","export default {plugins:[]};"));
+   JSONObject viteCheck=LocalCompiler.check(a,viteProject);
+   check(viteCheck.optJSONArray("warnings")!=null&&viteCheck.optJSONArray("warnings").length()>0,
+    "an environment hint shows up in the warnings");
+   check(viteCheck.optBoolean("ok",false),
+    "an environment hint alone does not fail the check");
+   check(viteCheck.optJSONArray("hints")!=null&&viteCheck.optJSONArray("hints").length()>0,
+    "environment hints are listed separately from fatal ones");
+   check(viteCheck.optJSONArray("fatalWarnings")!=null&&viteCheck.optJSONArray("fatalWarnings").length()==0,
+    "an environment hint is not counted as fatal");
+   /* Anthropic 形态也要能分组 */
+   JSONArray anthHistory=new JSONArray();
+   anthHistory.put(new JSONObject().put("role","user").put("content","原始任务"));
+   for(int i=0;i<20;i++){
+    String id="tu_"+i;
+    anthHistory.put(new JSONObject().put("role","assistant")
+     .put("content",new JSONArray().put(new JSONObject().put("type","tool_use").put("id",id)
+      .put("name","read_file").put("input",new JSONObject()))));
+    anthHistory.put(new JSONObject().put("role","user")
+     .put("content",new JSONArray().put(new JSONObject().put("type","tool_result")
+      .put("tool_use_id",id).put("content","内容 ".repeat(4000)))));
+   }
+   JSONArray anthTrimmed=DevAgent.trimToolHistory(anthHistory,200*1024);
+   check(anthTrimmed.length()<anthHistory.length(),"an anthropic-style history is trimmed too");
+   check(anthTrimmed.length()>0&&"原始任务".equals(anthTrimmed.optJSONObject(0).optString("content","")),
+    "the original request survives the anthropic-style trim");
+   JSONObject missResult=smoke.call("search_code",new JSONObject().put("query","zzz_绝对不存在的字符串_zzz"));
+   check(!missResult.optBoolean("found",true)&&missResult.optString("note","").contains("list_files"),
+    "a search miss explains itself instead of returning a bare empty array");
+   /*
+    * 记忆要能真的读回来 —— 这是 AGENT 跨会话能力的根。
+    * 只验证「没抛异常」是不够的：写不进去也照样不抛异常。
+    */
+   check(smoke.call("read_memory",new JSONObject().put("scope","project")).optString("project","").contains("冒烟测试记忆"),
+    "a remembered note can be read back");
+  }catch(Exception e){
+   throw new Exception("FAIL tool smoke test: "+e.getMessage());
+  }finally{
+   /* 清理：技能、记忆、项目、计划都不能留在用户数据里 */
+   try{a.skills.delete(smokeSkillName);}catch(Exception ignored){}
+   /* 只清项目范围，不碰用户的全局记忆 */
+   try{a.memory.clear("project",smokeProjectId);}catch(Exception ignored){}
+   try{a.remove("projects",smokeProjectId);}catch(Exception ignored){}
+  }
 
   /*
    * ── 原生 function calling 的协议层 ─────────────────────────
@@ -568,6 +1215,35 @@ final class SelfTest {
   JSONArray errorResults=DevAgent.toolResultMessages(errorResult,"compatible");
   check(errorResults.getJSONObject(0).optString("content").contains("文件不存在"),
    "a failed tool still returns a result the model can read");
+
+  /*
+   * 工具结果太长时的截断。
+   *
+   * <p>不截的话，read_file 读一个 300 KB 的源文件就进上下文了，
+   * 几十轮下来请求体撑爆，服务端要么拒、要么悄悄截断。
+   */
+  {
+   StringBuilder big2=new StringBuilder();
+   for(int i=0;i<40000;i++)big2.append("0123456789");
+   String fat=big2.toString();
+   String clamped=DevAgent.clampToolResult(fat);
+   check(clamped.length()<=DevAgent.MAX_TOOL_RESULT_CHARS+200,
+    "an oversized tool result is clamped to the cap");
+   check(clamped.contains("已省略中间"),"the clamped result says it was shortened");
+   check(clamped.contains(String.valueOf(fat.length())),"the clamped result states the original length");
+   check(clamped.startsWith("0123456789"),"the clamped result keeps the head");
+   check(clamped.endsWith("0123456789"),"the clamped result keeps the tail");
+   // 没超限的原样返回
+   check(DevAgent.clampToolResult("短").equals("短"),"a short tool result is untouched");
+   // 走协议时也要被截
+   JSONArray hugeResult=new JSONArray().put(new JSONObject().put("name","read_file").put("id","call_big")
+    .put("result",fat));
+   check(DevAgent.toolResultMessages(hugeResult,"compatible").getJSONObject(0).optString("content").length()
+    <=DevAgent.MAX_TOOL_RESULT_CHARS+200,"an oversized tool result is clamped on the openai path");
+   check(DevAgent.toolResultMessages(hugeResult,"anthropic").getJSONObject(0).optJSONArray("content")
+    .getJSONObject(0).optString("content").length()<=DevAgent.MAX_TOOL_RESULT_CHARS+200,
+    "an oversized tool result is clamped on the anthropic path");
+  }
 
   /*
    * assistant 侧的 tool_calls 消息必须带 id，
@@ -672,7 +1348,27 @@ final class SelfTest {
    +"data: [DONE]\n\n";
   java.io.ByteArrayInputStream sseIn3=new java.io.ByteArrayInputStream(twoCallsSse.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   StreamResponse sseStream3=new StreamResponse();
-  try{
+
+  /*
+   * 参数被截断时先试着补全 —— 补得回来就不用让模型重发一遍。
+   * 这四条是模型输出被 max_tokens 截断时最常见的四种断法。
+   */
+  JSONObject fix1=new JSONObject(StreamResponse.repairTruncatedJson("{\"path\":\"src/App.tsx\""));
+  check(fix1.getString("path").equals("src/App.tsx"),
+   "a truncated object is closed and parsed");
+  JSONObject fix2=new JSONObject(StreamResponse.repairTruncatedJson("{\"a\":[1,2"));
+  check(fix2.getJSONArray("a").length()==2,
+   "a truncated array is closed and parsed");
+  JSONObject fix3=new JSONObject(StreamResponse.repairTruncatedJson("{\"a\":\"还没写完"));
+  check(fix3.getString("a").equals("还没写完"),
+   "an unclosed string is closed and parsed");
+  JSONObject fix4=new JSONObject(StreamResponse.repairTruncatedJson("{\"files\":{\"a.ts\":\"x\",\"b.ts\":\"y\""));
+  check(fix4.getJSONObject("files").length()==2,
+   "nested braces are closed in the right order");
+  check(StreamResponse.repairTruncatedJson("完全不是 JSON")==null,
+   "text that is not JSON at all is not guessed at");
+  check(StreamResponse.repairTruncatedJson("{\"a\":1}")==null,
+   "a payload that was already valid is left alone");  try{
    java.io.BufferedReader reader=new java.io.BufferedReader(new java.io.InputStreamReader(sseIn3,java.nio.charset.StandardCharsets.UTF_8));
    String line;StringBuilder event=new StringBuilder();
    while((line=reader.readLine())!=null){
@@ -688,6 +1384,37 @@ final class SelfTest {
    check("list_files".equals(twoCalls.getJSONObject(0).optString("name"))
     &&"read_file".equals(twoCalls.getJSONObject(1).optString("name")),
     "parallel streamed tool calls keep their own names");
+  }
+
+  /*
+   * ── 端到端：工具连续失败要熔断 ────────────────────────────
+   *
+   * fixture 的 /tools-fail 每次都让模型调 read_file 读一个不存在的文件，
+   * 工具永远失败。以前这里会一路循环到 40 轮上限 ——
+   * 用户等几分钟、白烧几十次请求，最后拿到的还是一句失败。
+   *
+   * 正确行为：连续几轮全败就停，并且说清失败原因。
+   */
+  try{
+   JSONObject failProject=new JSONObject().put("id","qa-fail").put("name","失败自测")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body>x</body></html>"));
+   a.upsert("projects",failProject);
+   JSONArray failMessages=new JSONArray().put(new JSONObject().put("role","user").put("content","读一个不存在的文件"));
+   ApiClient failClient=new ApiClient();
+   failClient.progress=null;
+   JSONObject failProfile=profile("tools-fail","compatible").put("id","qa-fail-profile").put("streaming",false);
+   JSONObject failResult=DevAgent.run(a,failClient,failProfile,"fixture-secret",failMessages,"system",failProject,true);
+   check(failResult.optBoolean("incomplete"),"repeated tool failures stop the loop");
+   check(failResult.optString("text","").contains("全部失败"),
+    "the stop message says the tools kept failing [text="+failResult.optString("text","")+"]");
+   check(failResult.optString("text","").contains("不存在")||failResult.optString("text","").contains("失败原因"),
+    "the stop message names the failure reason");
+   /* 熔断必须早于轮次上限，否则等于没熔断 */
+   JSONArray failTrail=failResult.optJSONArray("toolCalls");
+   check(failTrail!=null&&failTrail.length()<=DevAgent.MAX_CONSECUTIVE_FAIL_ROUNDS+1,
+    "the loop stops after a few failed rounds, not after the full round cap [rounds="+(failTrail==null?"null":failTrail.length())+"]");
+  }catch(Exception e){
+   throw new Exception("FAIL repeated tool failures are cut short: "+e.getMessage());
   }
 
   /*
@@ -727,6 +1454,100 @@ final class SelfTest {
    }
   }catch(Exception e){
    throw new Exception("FAIL native tool loop end-to-end: "+e.getMessage());
+  }
+
+  /*
+   * ── 端到端：模型通过工具改文件，改动必须被保留 ──────────
+   *
+   * <p><b>这是原生 function calling 改造里最要命的一条链路。</b>
+   *
+   * <p>原生路径下，模型把文件内容放在 tool_calls（write_files）里，
+   * 最终文本是**人话回答**，里面根本没有 files JSON。
+   *
+   * <p>而 Studio 原来只做
+   * {@code ProjectEdits.parse(result.optString("text"))} ——
+   * 从最终文本里抠 JSON。原生路径下这必然抛「模型没有返回 files 文件对象」，
+   * 于是**模型明明改对了文件，改动却被整个丢掉**。
+   *
+   * <p>用户看到的现象：AI 说「已经改好了」，项目却一个字没变。
+   *
+   * <p>这条断言直接盯住 DevAgent 导出的 stagedFiles：
+   * 它必须带上模型在工具里改的那个文件，以及改后的内容。
+   */
+  try{
+   JSONObject editProject=new JSONObject().put("id","qa-edit").put("name","编辑自测")
+    .put("files",new JSONObject().put("src/main.js","console.log(1)").put("index.html","<html></html>"));
+   a.upsert("projects",editProject);
+   JSONArray editMessages=new JSONArray().put(new JSONObject().put("role","user").put("content","把 src/main.js 改成新内容"));
+   ApiClient editClient=new ApiClient();
+   editClient.progress=null;
+   JSONObject editProfile=profile("tools-edit","compatible").put("id","qa-tools-edit").put("streaming",false);
+   JSONObject editResult=DevAgent.run(a,editClient,editProfile,"fixture-secret",editMessages,"system",editProject,true);
+   JSONObject staged=editResult.optJSONObject("stagedFiles");
+   check(staged!=null,"native tool edits are exported as stagedFiles [result="+editResult.optJSONArray("toolCalls")+"]");
+   if(staged!=null){
+    check(staged.has("src/main.js"),"the edited file is present in stagedFiles [staged="+staged+"]");
+    if(staged.has("src/main.js")){
+     check("console.log(\"edited by agent\")".equals(staged.optString("src/main.js","")),
+      "the edited file carries the NEW content, not the old one [got="+staged.optString("src/main.js","")+"]");
+    }
+   }
+   /*
+    * 模型最终说的应该是人话，不该是一坨 JSON。
+    * 如果正文里出现 files JSON，说明模型被旧的文本协议污染了。
+    */
+   check(!editResult.optString("text","").contains("\"files\""),
+    "the final answer stays human-readable, not a raw files JSON [text="+editResult.optString("text","")+"]");
+  }catch(Exception e){
+   throw new Exception("FAIL native tool edit end-to-end: "+e.getMessage());
+  }
+
+  /*
+   * ── 端到端：多轮依赖流程 ────────────────────────────────────
+   *
+   * <p>fixture 的 /tools-flow 会模拟一个真正干活的模型：
+   * 先读文件 → 用读到的内容改文件 → 编译检查 → 回答。
+   *
+   * <p>第 2 步的写入内容**依赖第 1 步读到的内容**。
+   * 这一环能暴露三类问题：
+   * ① 工具结果没回传给模型 → 模型拿不到旧内容，写出来的东西是瞎编的；
+   * ② staged 改动没累积 → 第 2 轮写的内容被后面某步覆盖掉；
+   * ③ 循环提前退出 → 编译检查那步根本没跑。
+   */
+  try{
+   JSONObject flowProject=new JSONObject().put("id","qa-flow").put("name","流程自测")
+    .put("files",new JSONObject().put("index.html","<html><head><title>旧标题</title></head><body>Hi</body></html>"));
+   a.upsert("projects",flowProject);
+   JSONArray flowMessages=new JSONArray().put(new JSONObject().put("role","user").put("content","把标题改成会议助手"));
+   ApiClient flowClient=new ApiClient();
+   flowClient.progress=null;
+   JSONObject flowProfile=profile("tools-flow","compatible").put("id","qa-tools-flow").put("streaming",false);
+   JSONObject flowResult=DevAgent.run(a,flowClient,flowProfile,"fixture-secret",flowMessages,"system",flowProject,true);
+   JSONArray flowTrail=flowResult.optJSONArray("toolCalls");
+   check(flowTrail!=null&&flowTrail.length()>=3,
+    "the multi-step flow ran read, write and check [trail="+flowTrail+"]");
+   if(flowTrail!=null){
+    StringBuilder names=new StringBuilder();
+    for(int i=0;i<flowTrail.length();i++)names.append(flowTrail.optJSONObject(i).optString("name")).append(",");
+    check(names.indexOf("read_file")>=0,"the flow read the file first");
+    check(names.indexOf("write_files")>=0,"the flow wrote the file");
+    check(names.indexOf("check_project")>=0,"the flow checked the project after writing");
+   }
+   JSONObject flowStaged=flowResult.optJSONObject("stagedFiles");
+   check(flowStaged!=null&&flowStaged.has("index.html"),"the flow left the edited file in stagedFiles");
+   if(flowStaged!=null&&flowStaged.has("index.html")){
+    String flowContent=flowStaged.optString("index.html","");
+    check(flowContent.contains("会议助手"),"the edited content carries the change [got="+flowContent+"]");
+    check(!flowContent.contains("旧标题"),"the old title was replaced, not kept alongside");
+    /*
+     * 关键：第 2 步的写入依赖第 1 步读到的内容。
+     * 如果模型没拿到工具结果，它写出来的 index.html 就没有「Hi」这段正文。
+     */
+    check(flowContent.contains("Hi"),"the write was based on the content the model actually read");
+   }
+   check(flowResult.optString("text","").contains("会议助手"),"the flow ends with a human-readable answer");
+  }catch(Exception e){
+   throw new Exception("FAIL multi-step native flow end-to-end: "+e.getMessage());
   }
 
   // Anthropic 版本的同款端到端
