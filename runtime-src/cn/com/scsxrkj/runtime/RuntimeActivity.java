@@ -280,12 +280,21 @@ public class RuntimeActivity extends Activity {
                     }
 
                     // 严格 CSP：禁外部脚本、禁 iframe、禁 object。
+                    //
+                    // 必须带 'wasm-unsafe-eval'：Chromium 97 起，CSP 里有 script-src
+                    // 却没开 wasm-unsafe-eval（也没开 unsafe-eval）时，WebAssembly 直接被禁用。
+                    // 少了这一项，任何跑 wasm 的项目（语音识别、图像处理、编解码、游戏引擎）
+                    // 都会在初始化阶段静默失败 —— 文件都在、路径都对，就是跑不起来，
+                    // 界面上只看到一句笼统的「功能不可用」。
                     Map<String, String> headers = new HashMap<>();
                     headers.put("Content-Security-Policy",
-                            "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; "
+                            "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
                           + "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
-                          + "connect-src https: blob:; img-src 'self' data: blob: https:; "
-                          + "media-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'none'");
+                          // ws:/wss: 给 WebSocket（实时聊天、协同编辑、推送）；
+                          // media-src 的 https: 让网络音频、视频流能播。
+                          // 这两条不放，对应的功能会静默失败，和 wasm 那次的症状一模一样。
+                          + "connect-src https: blob: ws: wss:; img-src 'self' data: blob: https:; "
+                          + "media-src 'self' blob: https:; frame-src 'none'; object-src 'none'; base-uri 'none'");
                     return new WebResourceResponse(RuntimeAssets.mime(f), "UTF-8", 200, "OK",
                             headers, new ByteArrayInputStream(data));
                 } catch (Exception e) {

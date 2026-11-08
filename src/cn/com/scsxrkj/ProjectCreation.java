@@ -23,7 +23,7 @@ final class ProjectCreation {
  }
  static JSONObject create(JSONObject state,String chatId,String text)throws Exception{
   if(!requested(text))throw new Exception("请明确说明新建本地项目");JSONObject chat=null;JSONArray chats=state.getJSONArray("chats");for(int i=0;i<chats.length();i++)if(chatId.equals(chats.getJSONObject(i).optString("id")))chat=chats.getJSONObject(i);
-  if(chat==null||!chat.optString("projectId").isEmpty()||chat.getJSONArray("messages").length()!=1||!text.equals(chat.getJSONArray("messages").getJSONObject(0).optString("content")))throw new Exception("新项目需要独立的新对话，请重新发送");
+  if(chat==null||!chat.optString("projectId").isEmpty()||chat.getJSONArray("messages").length()!=1||!text.equals(MainActivity.messageText(chat.getJSONArray("messages").getJSONObject(0))))throw new Exception("新项目需要独立的新对话，请重新发送");
   String name="AI 新项目";Matcher quoted=Pattern.compile("[“「\"]([^”」\"\\n]{1,40})[”」\"]").matcher(text);if(quoted.find())name=quoted.group(1).trim();
   else{Matcher m=Pattern.compile("(?:新建|创建|建立|另建)(?:一个|个|一款)?(.{1,24}?)(?:项目|工程|应用|APP|app)").matcher(text);if(m.find()&&!m.group(1).contains("\n"))name=m.group(1).trim();}
   if(name.isEmpty())name="AI 新项目";JSONArray ps=state.getJSONArray("projects");String base=name;int suffix=2;Set<String>names=new HashSet<>();for(int i=0;i<ps.length();i++)names.add(ps.getJSONObject(i).optString("name"));while(names.contains(name))name=base+" "+suffix++;

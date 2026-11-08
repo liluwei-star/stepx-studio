@@ -34,7 +34,17 @@ final class CloudProjects {
  JSONObject op(String action)throws Exception{return new JSONObject().put("action",action);}
  void list(){try{available();execute(op("list"),r->{JSONArray ps=r.getJSONArray("projects");if(ps.length()==0){a.toast("当前账号还没有云端项目");return;}String[]labels=new String[ps.length()];for(int i=0;i<ps.length();i++)labels[i]=ps.getJSONObject(i).optString("name");new AlertDialog.Builder(a).setTitle("同步云端项目到本地").setItems(labels,(d,n)->{try{pull(ps.getJSONObject(n).getString("id"));}catch(Exception e){fail(e);}}).setNegativeButton("取消",null).show();});}catch(Exception e){fail(e);}}
  JSONObject find(String cloudId)throws Exception{JSONArray ps=a.state.getJSONArray("projects");for(int i=0;i<ps.length();i++){JSONObject p=ps.getJSONObject(i),c=p.optJSONObject("cloud");if(c!=null&&cloudId.equals(c.optString("id")))return p;}return null;}
- void pullLocal(String id)throws Exception{JSONObject p=a.byId("projects",id),c=p.optJSONObject("cloud");if(c==null){list();return;}pull(c.getString("id"));}
+  /**
+  * 从本地项目反查云端项目并同步。
+  *
+  * <p>走 {@link #probeAndPull}：先探测清单让用户选要带哪些，
+  * 而不是闷头把默认跳过的东西全丢了 —— 79 MB 的识别模型就在被跳过的 dist 里。
+  */
+ void pullLocal(String id)throws Exception{
+  JSONObject p=a.byId("projects",id),c=p.optJSONObject("cloud");
+  if(c==null){list();return;}
+  probeAndPull(c.getString("id"));
+ }
  /**
   * 把暂存区里的大文件搬进项目的大文件目录。
   *
@@ -65,14 +75,87 @@ final class CloudProjects {
   }
  }
 
- void pull(String id)throws Exception{available();JSONObject old=find(id);final String localId=old==null?"":old.getString("id");final JSONObject before=old==null?new JSONObject():CloudFiles.entries(old);
-  execute(op("pull").put("projectId",id),r->{JSONObject remote=r.getJSONObject("entries"),meta=r.getJSONObject("project");CloudFiles.validate(remote);JSONObject p;
+  /**
+  * 同步前先探测：只列清单，不下载。
+  *
+  * <p>为什么要这一步：云端项目里有些目录默认不同步（依赖、构建产物、后台界面），
+  * 但用户可能确实需要 —— 比如 79 MB 的语音识别模型就在 dist 里，
+  * 默认跳过的话装到手机上本地识别永远不可用。
+  *
+  * <p>所以先让用户看到「要下什么、能补什么、绝不给什么」，选完再真下。
+  *
+  * <p>分三档：
+  * <ul>
+  *   <li><b>直接同步</b> —— 源码和运行时资源</li>
+  *   <li><b>可选</b> —— 默认跳过的目录，用户勾了才带</li>
+  *   <li><b>绝不给</b> —— 平台签名私钥、后端凭据。这不是"可选"，
+  *       带了等于把别人的密钥搬到你这台设备上</li>
+  * </ul>
+  *
+  * @param id 云端项目 id
+  */
+ void probeAndPull(String id){
+  try{
+   available();
+   execute(op("probe").put("projectId",id),r->{
+    final JSONObject probe=r;
+    final int safe=probe.optInt("safe"),optional=probe.optInt("optional"),blocked=probe.optInt("blocked"),total=probe.optInt("total");
+    final JSONObject groups=probe.optJSONObject("groups");
+    a.runOnUiThread(()->{
+     StringBuilder sb=new StringBuilder();
+     sb.append("云端共 ").append(total).append(" 个文件。\n\n");
+     sb.append("✓ 直接同步：").append(safe).append(" 个\n");
+     if(optional>0){
+      sb.append("\n可选（默认跳过）").append(optional).append(" 个：\n");
+      if(groups!=null)for(Iterator<String>it=groups.keys();it.hasNext();){
+       String k=it.next();
+       sb.append("· ").append(k).append("（").append(groups.optJSONObject(k).optInt("count")).append(" 个）\n");
+      }
+      sb.append("\n注意：构建产物目录里可能含本地识别模型（几十 MB），\n带上才能离线识别，但同步会变慢很多。\n");
+     }
+     if(blocked>0){
+      sb.append("\n✕ 不会同步 ").append(blocked).append(" 个：\n");
+      sb.append("平台签名私钥、后端凭据。这些属于平台，不该跟到你的设备上。\n");
+     }
+     new android.app.AlertDialog.Builder(a)
+      .setTitle("同步 "+probe.optJSONObject("project").optString("name","云端项目"))
+      .setMessage(sb.toString())
+      .setPositiveButton(optional>0?"全部同步":"开始同步",(d,n)->startPull(id,optional>0))
+      .setNegativeButton(optional>0?"只同步源码":"取消",(d,n)->{if(optional>0)startPull(id,false);})
+      .show();
+    });
+   });
+  }catch(Exception e){a.toast("同步失败："+a.safeError(e));}
+ }
+
+ /**
+  * 从弹窗回调里启动同步。
+  *
+  * <p>弹窗的按钮回调不能抛受检异常，所以单独包一层：
+  * 出错转成提示，不让它静默消失。
+  */
+ void startPull(String id,boolean includeOptional){
+  try{pull(id,includeOptional);}
+  catch(Exception e){a.toast("同步失败："+a.safeError(e));}
+ }
+
+ /** 带选项的同步入口。 */
+ void pull(String id)throws Exception{pull(id,false);}
+
+ /**
+  * 执行同步。
+  *
+  * @param id              云端项目 id
+  * @param includeOptional true 表示把默认跳过的目录也带上（含模型）
+  */
+ void pull(String id,boolean includeOptional)throws Exception{available();JSONObject old=find(id);final String localId=old==null?"":old.getString("id");final JSONObject before=old==null?new JSONObject():CloudFiles.entries(old);
+  execute(op("pull").put("projectId",id).put("includeOptional",includeOptional),r->{JSONObject remote=r.getJSONObject("entries"),meta=r.getJSONObject("project");CloudFiles.validate(remote);JSONObject p;
    synchronized(a){JSONObject backup=new JSONObject(a.state.toString());try{if(localId.isEmpty()){p=new JSONObject().put("id",UUID.randomUUID().toString()).put("name",meta.getString("name")).put("files",new JSONObject()).put("cloudSource",true);}else{p=new JSONObject(a.byId("projects",localId).toString());if(!ProjectEdits.same(CloudFiles.hashes(before),CloudFiles.hashes(CloudFiles.entries(p))))throw new Exception("同步期间本地文件已修改，没有覆盖");}
     JSONObject c=p.optJSONObject("cloud"),base=c==null?new JSONObject():c.optJSONObject("base");if(base==null)base=new JSONObject();
     // 大文件先从暂存区搬进项目的大文件目录，再参与合并 ——
     // 暂存区是一次性的，合并后项目必须自给自足。
     materializeBig(id,remote);
-    JSONObject merged=CloudFiles.merge(before,remote,base);if(!localId.isEmpty())CloudFiles.snapshot(p);CloudFiles.assign(p,merged,a.getFilesDir());p.put("updated",System.currentTimeMillis()).put("cloudSource",true).put("studioUrl",url(meta));p.put("cloud",new JSONObject().put("id",id).put("name",meta.getString("name")).put("builderType",meta.optString("builderType","app")).put("base",CloudFiles.hashes(remote)).put("lastPull",System.currentTimeMillis()).put("skipped",r.optJSONArray("skipped")).put("message","已同步 "+remote.length()+" 个云端源文件；本地独立修改保留"));a.upsert("projects",p);
+    JSONObject merged=CloudFiles.merge(before,remote,base);if(!localId.isEmpty())CloudFiles.snapshot(p);CloudFiles.assign(p,merged,a.getFilesDir());p.put("updated",System.currentTimeMillis()).put("cloudSource",true).put("studioUrl",url(meta));p.put("cloud",new JSONObject().put("id",id).put("name",meta.getString("name")).put("builderType",meta.optString("builderType","app")).put("base",CloudFiles.hashes(remote)).put("lastPull",System.currentTimeMillis()).put("skipped",r.optJSONArray("skipped")).put("skipReasons",r.optJSONObject("skipByReason")).put("message","已同步 "+remote.length()+" 个云端源文件；本地独立修改保留"));a.upsert("projects",p);
    }catch(Exception e){a.state=backup;throw e;}}
    // 大文件落盘情况记到日志。排障时能直接看出哪个大文件、多大、哈希多少，
    // 不用去翻应用私有目录。
@@ -86,7 +169,25 @@ final class CloudProjects {
      android.util.Log.i("NeoCloudBig","大文件 "+n+" 大小="+sz+" 字节 哈希="+(sha.length()>16?sha.substring(0,16):sha));
     }
    }catch(Exception ignored){}
-   a.sendState();a.event("projectOpen",p.getString("id"));a.toast("已同步 "+remote.length()+" 个文件"+(r.optJSONArray("skipped").length()>0?"；已排除依赖、构建产物或敏感文件，详见同步记录":""));
+   a.sendState();a.event("projectOpen",p.getString("id"));
+    // 有东西没同步下来就说明白 —— 少了什么、为什么少。
+    // 用户最怕的是「以为文件都在，装上后才发现 79 MB 的模型没了」。
+    try{
+     JSONObject reasons=p.optJSONObject("skipReasons");
+     if(reasons!=null&&reasons.length()>0){
+      StringBuilder sb=new StringBuilder("以下内容没有同步下来：\n");
+      for(Iterator<String>it=reasons.keys();it.hasNext();){
+       String k=it.next();
+       sb.append("· ").append(k).append("（").append(reasons.optInt(k)).append(" 个）\n");
+      }
+      sb.append("\n依赖目录可以重新安装；证书和平台凭据不应该跟到别的设备上，所以没带。");
+      new android.app.AlertDialog.Builder(a).setTitle("已同步 "+remote.length()+" 个文件").setMessage(sb.toString()).setPositiveButton("知道了",null).show();
+     }else{
+      a.toast("已同步 "+remote.length()+" 个文件");
+     }
+    }catch(Exception ignored){
+     a.toast("已同步 "+remote.length()+" 个文件");
+    }
   });
  }
  String url(JSONObject m){return "https://studio.stepx.com/builder/"+(Arrays.asList("app","agent","skill").contains(m.optString("builderType"))?m.optString("builderType"):"app")+"/"+m.optString("id");}

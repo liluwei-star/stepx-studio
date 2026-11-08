@@ -24,12 +24,20 @@ final class LocalAiClient extends ApiClient {
   Engine engine=new Engine(new EngineConfig(file.getAbsolutePath(),backend,null,null,tokens,null,new File(context.getCacheDir(),"local-ai").getAbsolutePath()));boolean initialized=false;
   try{
    if(cancelled)throw new InterruptedIOException("已取消");engine.initialize();initialized=true;if(cancelled)throw new InterruptedIOException("已取消");
-   List<Message> initial=new ArrayList<>();for(int i=0;i<messages.length()-1;i++){JSONObject m=messages.getJSONObject(i);initial.add(m.optString("role").equals("assistant")?Message.Companion.model(m.optString("content")):Message.Companion.user(m.optString("content")));}
+   List<Message> initial=new ArrayList<>();for(int i=0;i<messages.length()-1;i++){JSONObject m=messages.getJSONObject(i);initial.add(m.optString("role").equals("assistant")?Message.Companion.model(MainActivity.messageText(m)):Message.Companion.user(MainActivity.messageText(m)));}
    SamplerConfig sampler=new SamplerConfig(p.optInt("topK",64),p.optDouble("topP",0.95),p.optDouble("temperature",1.0),0);
    ConversationConfig config=new ConversationConfig(Contents.Companion.of(system),initial,Collections.emptyList(),sampler,false,null,Collections.emptyMap(),null,false,output,new ThinkingConfig(p.optBoolean("localThinking",false),p.optInt("thinkingBudget",512)));
    Conversation c=engine.createConversation(config);conversation=c;try{
     CountDownLatch done=new CountDownLatch(1);StringBuilder text=new StringBuilder(),reasoning=new StringBuilder();Throwable[] failure={null};
-    c.sendMessageAsync(messages.getJSONObject(messages.length()-1).optString("content"),new MessageCallback(){
+    /*
+     * 本地模型没有视觉能力。带图片的这条消息只取文字部分，
+     * 并明确告诉模型「图被忽略了」—— 不说的话它可能顺着用户的描述
+     * 凭空编出图里的内容，用户会以为它真的看懂了。
+     */
+    JSONObject lastMessage=messages.getJSONObject(messages.length()-1);
+    String lastText=MainActivity.messageText(lastMessage);
+    int attachedImages=MainActivity.messageImageCount(lastMessage);
+    c.sendMessageAsync(attachedImages>0?(lastText+"\n\n（用户附了 "+attachedImages+" 张图片，本地模型看不到图片内容，以上文字是全部可用信息）").trim():lastText,new MessageCallback(){
      public void onMessage(Message message){text.append(message.toString());String thought=message.getChannels().get("thought");if(thought!=null)reasoning.append(thought);if(progress!=null)progress.update(text.toString(),reasoning.toString());}
      public void onDone(){done.countDown();}
      public void onError(Throwable error){failure[0]=error;done.countDown();}

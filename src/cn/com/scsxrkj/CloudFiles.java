@@ -109,7 +109,80 @@ final class CloudFiles {
  }
 
  static boolean path(String p){if(p==null||p.isEmpty()||p.length()>240||p.startsWith("/")||java.util.regex.Pattern.compile("[\\\\\\x00-\\x1f\\x7f]").matcher(p).find())return false;for(String s:p.split("/",-1))if(s.isEmpty()||s.equals(".")||s.equals(".."))return false;return true;}
- static boolean excluded(String p){return p.matches("(?i)(?:.*/)?(?:\\.git|node_modules|\\.gradle|build|dist|\\.next|\\.cache)(?:/.*)?")||p.matches("(?i)(?:.*/)?(?:\\.env(?:\\..*)?|credentials(?:\\..*)?|secrets?(?:\\..*)?|local\\.properties|capsule\\.properties|id_rsa|id_ed25519)")||p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)");}
+ /**
+  * 判断一个路径要不要排除在同步/导入之外。
+  *
+  * <p><b>判断标准是「能不能重建」，不是「是不是构建产物」</b>
+  *
+  * <p>早期这里把 {@code dist} 和 {@code node_modules} 归成同一类「构建产物」一起排除，
+  * 结果模型权重丢了 —— 而且是永久丢失：
+  *
+  * <ul>
+  *   <li>语音识别权重（79 MB，20 片）在 {@code dist/client/web/asr/models/}，
+  *       是平台构建时从网络下载后切片的</li>
+  *   <li>它<b>不在源码里</b>（源码只有 wasm 和 tokens.txt）</li>
+  *   <li>它<b>不在 git 里</b>（79 MB 放不进仓库）</li>
+  *   <li>它<b>不在 node_modules 里</b>（那只是构建缓存）</li>
+  * </ul>
+  *
+  * <p>也就是说，排除 dist 之后这个模型<b>再也拿不回来</b> ——
+  * 重新构建要从网络重新下载，而应用装上后本地识别永远不可用。
+  *
+  * <p>所以现在按「能不能重建」分：
+  * <ul>
+  *   <li><b>排除</b>：node_modules、.git、.cache —— 能重建，占空间大</li>
+  *   <li><b>排除</b>：dist/admin、dist/build-report.json —— 后台 UI 和报告，应用用不到</li>
+  *   <li><b>保留</b>：dist/client/web/ —— 编译成品 + 不可重建的模型</li>
+  *   <li><b>排除</b>：证书私钥、平台凭据 —— 那是平台的东西，不该进你的项目</li>
+  * </ul>
+  *
+  * @param p 路径
+  * @return true 表示要排除
+  */
+ static boolean excluded(String p){
+  // 编译成品：保留（里面有不可重建的模型权重）
+  if(p.startsWith("dist/client/web/"))return false;
+  // 后台管理 UI 和构建报告：应用用不到
+  if(p.startsWith("dist/admin/")||p.equals("dist/build-report.json"))return true;
+  // 可重建的目录：排除
+  if(p.matches("(?i)(?:.*/)?(?:\\.git|node_modules|\\.gradle|build|\\.next|\\.cache)(?:/.*)?"))return true;
+  // dist 下其他目录（构建中间产物）：排除
+  if(p.startsWith("dist/"))return true;
+  // 平台凭据与私钥：绝不能进你的项目
+  if(p.matches("(?i)(?:.*/)?(?:\\.env(?:\\..*)?|credentials(?:\\..*)?|secrets?(?:\\..*)?|local\\.properties|capsule\\.properties|id_rsa|id_ed25519)"))return true;
+  if(p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)"))return true;
+  return false;
+ }
+ /**
+  * 说明一个路径为什么被跳过。
+  *
+  * <p>同步/导入时不是所有文件都会带过来。被跳过的要让用户知道 ——
+  * 静默丢弃会让人以为「文件都在」，等用到时才发现少了一堆。
+  *
+  * @param p 路径
+  * @return 跳过原因；不跳过返回 null
+  */
+ static String skipReason(String p){
+  if(p.startsWith("dist/client/web/"))return null;
+  if(p.startsWith("dist/admin/"))return "后台管理界面，手机应用用不到";
+  if(p.equals("dist/build-report.json"))return "平台构建报告";
+  if(p.matches("(?i)(?:.*/)?node_modules(?:/.*)?"))return "依赖目录，可重新安装";
+  if(p.matches("(?i)(?:.*/)?\\.git(?:/.*)?"))return "版本库目录";
+  if(p.matches("(?i)(?:.*/)?\\.cache(?:/.*)?"))return "缓存目录";
+  if(p.matches("(?i)(?:.*/)?build(?:/.*)?"))return "构建中间产物";
+  if(p.matches("(?i)(?:.*/)?\\.gradle(?:/.*)?"))return "Gradle 缓存";
+  if(p.matches("(?i)(?:.*/)?\\.next(?:/.*)?"))return "Next 构建缓存";
+  if(p.startsWith("dist/"))return "构建中间产物";
+  if(p.matches("(?i)(?:.*/)?\\.env(?:\\..*)?"))return "平台后端连接信息，含密钥";
+  if(p.matches("(?i)(?:.*/)?credentials(?:\\..*)?"))return "凭据文件";
+  if(p.matches("(?i)(?:.*/)?secrets?(?:\\..*)?"))return "密钥文件";
+  if(p.matches("(?i)(?:.*/)?local\\.properties"))return "本机路径配置";
+  if(p.matches("(?i)(?:.*/)?capsule\\.properties"))return "平台签名口令";
+  if(p.matches("(?i)(?:.*/)?id_rsa")||p.matches("(?i)(?:.*/)?id_ed25519"))return "SSH 私钥";
+  if(p.matches("(?i).*\\.(p12|pfx|jks|keystore|pem|key)"))return "证书与私钥";
+  return null;
+ }
+
  /**
   * 把一组名字用顿号连成一句，供报错文案使用。
   *

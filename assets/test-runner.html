@@ -1,0 +1,11 @@
+<!--
+  test-runner.html —— 单元测试的执行容器
+  ================================================================
+  和 local-runner.html 是一对：那个负责编译出可运行的页面，
+  这个负责把测试文件跑起来并收集结果。
+
+  同样在隔离 WebView 里运行，没有任何原生桥：
+  测试代码再怎么写都碰不到 App 的数据。
+  ================================================================
+-->
+<!doctype html><meta charset="utf-8"><script src="local-vendor/esbuild.js"></script><script src="test-runner.js"></script>

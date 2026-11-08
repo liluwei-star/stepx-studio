@@ -33,7 +33,7 @@ button:focus-visible,input:focus,textarea:focus,select:focus{outline:3px solid #
 .card{border:1px solid #fffffff2;border-radius:24px;background:linear-gradient(145deg,#fffffff5,#f8fbffed);box-shadow:0 8px 24px #304f7510,inset 0 1px 0 #fff;padding:18px;margin:16px 0}.card .card{box-shadow:none}.project{border-radius:22px;background:linear-gradient(145deg,#fffffff5,#f5f9fce8);border-color:#fff;box-shadow:0 6px 18px #294b7012;padding:16px;gap:13px}.project .mark{border:1px solid #ffffffc9;border-radius:14px;background:linear-gradient(145deg,#dcf2ff,#d5dfff);color:#195c9f;font-size:22px;box-shadow:inset 0 1px 0 #fff}.project strong{font-size:16px;line-height:1.4}.tag{border:1px solid #d1e5f5;border-radius:20px;color:#24598a;background:#eaf3fbed;padding:4px 9px}.empty{background:#ffffff7a;border:1px dashed #aabdd3;border-radius:24px;padding:30px 18px}
 .metric{border-color:#fff;border-radius:22px;background:#fffffff0;box-shadow:0 5px 18px #294b7010;padding:16px}.metric:first-child{background:linear-gradient(135deg,#e0f0ff,#e9e9ff);border-color:#fff}.metric b{font-size:28px;font-weight:700;color:#153f6e}.metric small{font-size:12px}
 .message{background:#fffffff2;border:1px solid #fff;border-radius:24px;box-shadow:0 5px 20px #294b700d;padding:16px}.message.user{background:#deedffeb;border-color:#edf6ff;margin-left:18px}.composer{background:#eff4fbd9;border:1px solid #fff;border-radius:26px;padding:12px;box-shadow:0 -6px 22px #30486814;backdrop-filter:blur(20px) saturate(135%);-webkit-backdrop-filter:blur(20px) saturate(135%)}.composer textarea{border-radius:18px}
-.editor{background:transparent;padding:12px;gap:10px}.files,.tools{padding:3px 1px 6px;gap:8px}.files button,.tools button{min-height:44px;border-radius:22px;padding:8px 14px}.files .chosen{background:linear-gradient(145deg,#086fce,#0754a9);color:white;border-color:#ffffff99}.editor #code{border-radius:20px;background:#142236;color:#e5effa;border:1px solid #ffffffad;box-shadow:0 7px 24px #193a5c20,inset 0 1px 0 #ffffff16;font-size:14px}.status{color:#465b74}.noticebar{border-radius:18px;background:#fff5deee;border-color:#e9d3a1;color:#6b4c0d;padding:12px 14px}.contextPreview{color:#263c57}.diffText{border-radius:16px;background:#f3f7fc;color:#203954}.split>*{min-width:0}summary{min-height:44px}#notice{border:1px solid #ffffff40;border-radius:22px;background:#1d334deb;backdrop-filter:blur(14px);box-shadow:0 8px 30px #122d522b}
+.editor{background:transparent;padding:12px;gap:10px}.files,.tools{padding:3px 1px 6px;gap:8px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;flex-wrap:nowrap}.files button,.tools button{min-height:44px;border-radius:22px;padding:8px 14px}.files .chosen{background:linear-gradient(145deg,#086fce,#0754a9);color:white;border-color:#ffffff99}.editor #code{border-radius:20px;background:#142236;color:#e5effa;border:1px solid #ffffffad;box-shadow:0 7px 24px #193a5c20,inset 0 1px 0 #ffffff16;font-size:14px}.status{color:#465b74}.noticebar{border-radius:18px;background:#fff5deee;border-color:#e9d3a1;color:#6b4c0d;padding:12px 14px}.contextPreview{color:#263c57}.diffText{border-radius:16px;background:#f3f7fc;color:#203954}.split>*{min-width:0}summary{min-height:44px}#notice{border:1px solid #ffffff40;border-radius:22px;background:#1d334deb;backdrop-filter:blur(14px);box-shadow:0 8px 30px #122d522b}
 .appearance{margin:16px 0 8px}.appearance summary{font-size:13px;color:#365471}.appearance select{margin:8px 0 0}.row{gap:10px}.row>button{flex-shrink:0}.project{flex-shrink:1}.project .grow{min-width:0;overflow-wrap:anywhere}
 html[data-appearance=solid] body{background:#eff4fb}html[data-appearance=solid] button,html[data-appearance=solid] .composer{backdrop-filter:none;-webkit-backdrop-filter:none;background:#f7faff}html[data-appearance=solid] .card,html[data-appearance=solid] .message,html[data-appearance=solid] .project{background:#fff}html[data-appearance=solid] button.primary{background:#005bc3;color:#fff}
 html[data-appearance=contrast]{--muted:#233e60;--ink:#0a1b32;--line:#57718f}html[data-appearance=contrast] body{background:#f3f6fa}html[data-appearance=contrast] .card,html[data-appearance=contrast] .message,html[data-appearance=contrast] .metric,html[data-appearance=contrast] .project{background:#fff;border-color:#758ba6;box-shadow:none}html[data-appearance=contrast] button{backdrop-filter:none;-webkit-backdrop-filter:none;background:#eef4fc;border-color:#57718f;color:#0b3f79;box-shadow:none}html[data-appearance=contrast] button.primary{background:#004fa9;color:#fff}html[data-appearance=contrast] .muted,html[data-appearance=contrast] small,html[data-appearance=contrast] label{color:#233e60}
@@ -261,3 +261,242 @@ html[data-appearance=contrast] .tag{background:#333;color:#fff;border-color:#aaa
 
 /* 全屏时代码框吃掉所有剩余空间 */
 .editor.code-focus #code{flex:1;min-height:0}
+
+/* ============================================================
+ * 变更视图 / 文件对比
+ * ============================================================
+ *
+ * 新增绿、修改橙、删除红、二进制蓝 —— 四种颜色的含义要一眼分得清。
+ * 对比页的行是等宽字体，行号和正文分开固定宽度，滚起来不晃。
+ */
+
+.page{display:flex;flex-direction:column;gap:10px}
+
+.diff-head{flex-shrink:0;display:flex;flex-direction:column;gap:6px}
+.diff-base{font-size:12px;color:#9a9aa4;padding:0 2px}
+.diff-sum{display:flex;flex-wrap:wrap;gap:10px;font-size:13px;font-weight:600}
+.diff-sum .c-add{color:#7fd39a}
+.diff-sum .c-mod{color:#e0a86a}
+.diff-sum .c-del{color:#e08585}
+.diff-sum .c-bin{color:#7fb6e0}
+.diff-sum .c-same{color:#8b8b95;font-weight:400}
+
+/* 筛选胶囊 */
+.chips{flex-shrink:0;display:flex;flex-wrap:wrap;gap:8px}
+.fchip{
+  font-size:12px;
+  padding:7px 12px;
+  border-radius:999px;
+  background:#202024;
+  border:1px solid #33333a;
+  color:#a9a9b3;
+}
+.fchip.on{background:#2c2c33;border-color:#4a4a55;color:#f0f0f5}
+
+/* 变更列表的一行 */
+.drow{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  width:100%;
+  text-align:left;
+  padding:11px 12px;
+  border-radius:10px;
+  background:#202024;
+  border:1px solid #33333a;
+  color:#e4e4ea;
+  font-size:13px;
+}
+.dsign{
+  flex-shrink:0;
+  width:20px;
+  text-align:center;
+  font-weight:700;
+  font-family:ui-monospace,monospace;
+}
+.dsign.c-add{color:#7fd39a}
+.dsign.c-mod{color:#e0a86a}
+.dsign.c-del{color:#e08585}
+.dsign.c-bin{color:#7fb6e0}
+.drow .fpath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace}
+.dhint{flex-shrink:0;font-size:11px;color:#7f8b99}
+
+/* 对比页正文 */
+.difftitle{font-size:13px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.diffbody{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:auto;
+  background:#17171b;
+  border:1px solid #2e2e34;
+  border-radius:12px;
+  padding:8px 0;
+  font-family:ui-monospace,monospace;
+  font-size:12.5px;
+  line-height:1.6;
+}
+.dl{display:flex;min-width:max-content;padding:0 10px;white-space:pre}
+.dlno{
+  flex-shrink:0;
+  width:44px;
+  text-align:right;
+  padding-right:10px;
+  color:#5f5f68;
+  user-select:none;
+}
+.dlmk{flex-shrink:0;width:14px;color:#6f6f78;user-select:none}
+.dltx{flex:1;color:#cdcdd4}
+.dl.add{background:#16261c}
+.dl.add .dltx{color:#a8e0b8}
+.dl.add .dlmk{color:#7fd39a}
+.dl.del{background:#2a1818}
+.dl.del .dltx{color:#e0aaaa}
+.dl.del .dlmk{color:#e08585}
+.dl.gap{background:#1c1c20;color:#6f6f78;font-size:11px;justify-content:center;padding:2px 0}
+
+/* ============================================================
+ * 多选批量操作
+ * ============================================================
+ */
+
+.fcheck{
+  flex-shrink:0;
+  width:38px;
+  font-size:15px;
+  border-radius:10px;
+  background:#202024;
+  border:1px solid #33333a;
+  color:#7fd39a;
+}
+.fcheck.on{background:#1e3326;border-color:#2f5340}
+
+.frow.sel-mode .fname.picked{background:#1e2a20;border-color:#2f5340}
+
+/* 底部操作栏：固定在列表下面，不随列表滚 */
+.fbar{
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:10px;
+  margin-top:4px;
+  background:#1d1d22;
+  border:1px solid #33333a;
+  border-radius:12px;
+}
+.fbar button{font-size:13px;padding:9px 14px;border-radius:9px;background:#2a2a30;border:1px solid #3d3d44;color:#e4e4ea}
+.fbar button.danger{background:#3a2222;border-color:#5a2e2e;color:#e8a0a0}
+.fbar button[disabled]{opacity:.4}
+.fbar .grow{flex:1;text-align:center;font-size:12px;color:#9a9aa4}
+
+/* 大文件页的删除按钮 */
+.fdel{
+  flex-shrink:0;
+  width:52px;
+  font-size:13px;
+  border-radius:10px;
+  background:#3a2222;
+  border:1px solid #5a2e2e;
+  color:#e8a0a0;
+}
+
+/* ============================================================
+ * 项目总览
+ * ============================================================
+ */
+
+.ovcard{
+  background:#1f1f24;
+  border:1px solid #2e2e34;
+  border-radius:14px;
+  padding:14px 16px;
+}
+.ovname{font-size:16px;font-weight:700;color:#ededf2}
+.ovsub{font-size:12px;color:#8b8b95;margin-top:4px;line-height:1.6}
+.ovtitle{font-size:13px;font-weight:700;color:#c9c9d2;margin-bottom:8px}
+.ovrow{display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid #2a2a30}
+.ovrow:last-child{border-bottom:none}
+.ovk{flex:1;font-size:13px;color:#a9a9b3}
+.ovv{font-size:14px;font-weight:600;color:#ededf2}
+.ovx{font-size:11px;color:#7f8b99;min-width:78px;text-align:right}
+.ovbtns{display:flex;flex-wrap:wrap;gap:8px}
+.ovbtns button{flex:1 1 40%;font-size:13px;padding:11px 10px;border-radius:10px;background:#26262b;border:1px solid #36363d;color:#e4e4ea}
+
+/* ============================================================
+ * 全局替换
+ * ============================================================
+ */
+
+.rpform{flex-shrink:0;display:flex;flex-direction:column;gap:9px}
+.rpform input{
+  font-size:14px;
+  padding:12px 14px;
+  border-radius:12px;
+  background:#17171b;
+  border:1px solid #3d3d44;
+  color:#e8e8ee;
+}
+.rpcb{display:flex;align-items:center;gap:9px;font-size:13px;color:#9a9aa4}
+.rpcb input{width:17px;height:17px;accent-color:#ff8a5b}
+.rpgo{
+  flex-shrink:0;
+  font-size:15px;
+  font-weight:700;
+  padding:14px;
+  border-radius:12px;
+  background:#3a2a1e;
+  border:1px solid #6a4526;
+  color:#ffb37a;
+}
+
+/* 空状态提示 */
+.empty-note{
+  background:#1f1f24;
+  border:1px solid #2e2e34;
+  border-radius:14px;
+  padding:18px 16px;
+  font-size:13px;
+  line-height:1.75;
+  color:#b9b9c2;
+}
+.empty-note button{
+  font-size:14px;
+  padding:12px;
+  border-radius:11px;
+  background:#2a2a30;
+  border:1px solid #3d3d44;
+  color:#e8e8ee;
+}
+
+
+/* ── AI 助手页面：消息区独立滚动，输入框固定底部 ──────────────────
+ *
+ * 原来的问题：页面顶部堆着模型下拉、对话历史、token 统计、项目卡片、
+ * 写入模式卡片，全是常驻内容。消息区被挤到屏幕外，输入框又是 sticky
+ * 吸在底部 —— 中间能看到的消息只剩窄窄一条。
+ *
+ * 现在的做法：设置类控件收进可折叠区（默认收起），消息区拿走剩余高度，
+ * 输入框固定在底部。折叠状态跨渲染保留。
+ */
+.ai-page{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;padding-bottom:0}
+.ai-page>.header{flex:0 0 auto}
+.ai-setup{flex:0 0 auto;margin:8px 0;border:1px solid var(--line);border-radius:12px;padding:8px 12px;background:var(--card)}
+.ai-setup>summary{cursor:pointer;font-size:14px;color:var(--muted);list-style:none;user-select:none}
+.ai-setup>summary::-webkit-details-marker{display:none}
+.ai-setup>summary::before{content:'▸ ';color:var(--accent)}
+.ai-setup[open]>summary::before{content:'▾ '}
+.ai-setup[open]>summary{margin-bottom:8px}
+.ai-setup .row{margin-top:0}
+#messages{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 0 12px;min-height:0}
+.ai-page .composer{flex:0 0 auto;position:sticky;bottom:0;z-index:5}
+.ai-page .noticebar{flex:0 0 auto}
+
+/* ── AI 对话里的图片附件 ───────────────────────────────────────
+   待发送时是 64px 的小方块，带一个移除按钮；
+   发出去之后在消息里最多占 280px 高，不挤掉正文。 */
+.attachments{display:flex;gap:8px;padding:4px 0 10px;overflow-x:auto}
+.attachment{position:relative;flex:0 0 auto}
+.attachment img{width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:var(--paper)}
+.attachment button{position:absolute;top:-6px;right:-6px;width:22px;height:22px;min-height:0;padding:0;border-radius:50%;font-size:13px;line-height:1;background:var(--ink);color:var(--paper);border:2px solid var(--paper)}
+.msg-img{display:block;max-width:100%;max-height:280px;border-radius:12px;margin:6px 0;border:1px solid var(--line)}

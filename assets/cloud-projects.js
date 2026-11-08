@@ -27,7 +27,54 @@ var NeoCloud = (() => {
  // 超过上限时不做「部分同步」——宁可明确失败，也不留下半套文件。
  const MAX=200*1024*1024, FILE=100*1024*1024, COUNT=3000, BIG=512*1024;
  const valid=p=>typeof p==='string'&&p.length>0&&p.length<=240&&!/[\\\x00-\x1f\x7f]/.test(p)&&!p.startsWith('/')&&p.split('/').every(x=>x&&x!=='.'&&x!=='..');
- const excluded=p=>/(^|\/)(\.git|node_modules|\.gradle|build|dist|\.next|\.cache)(\/|$)/i.test(p)||/(^|\/)(\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|local\.properties|capsule\.properties|id_rsa|id_ed25519)$/i.test(p)||/\.(p12|pfx|jks|keystore|pem|key)$/i.test(p);
+ /*
+  * 判断云端文件要不要同步下来。
+  *
+  * <p>标准是「能不能重建」，不是「是不是构建产物」。
+  *
+  * <p>早期把 dist 和 node_modules 归成一类一起排除，结果把
+  * <b>语音识别模型权重（79 MB，20 片）</b>也丢了。它在 dist/client/web/asr/models/ ，
+  * 是平台构建时从网络下载后切片的 —— 不在源码里、不在 git 里、也不在 node_modules 里。
+  * 排除之后这个模型<b>再也拿不回来</b>，应用装上后本地识别永远不可用。
+  *
+  * <p>所以现在分开处理：
+  * <ul>
+  *   <li>dist/client/web/ 保留 —— 编译成品 + 不可重建的模型</li>
+  *   <li>dist/admin/、构建报告 排除 —— 后台界面和报告，应用用不到</li>
+  *   <li>node_modules、.git、.cache 排除 —— 能重建，占空间大</li>
+  *   <li>证书私钥、平台凭据 排除 —— 那是平台的东西，不该进你的项目</li>
+  * </ul>
+  *
+  * <p>注意：这套规则必须和 native 侧的 CloudFiles.excluded() 一致。
+  * 两边各写各的必然漂移 —— 之前就漂移过一次，导致同步丢模型而导入不丢。
+  */
+ const excluded=p=>{
+  if(p.startsWith('dist/client/web/'))return false;
+  if(p.startsWith('dist/admin/')||p==='dist/build-report.json')return true;
+  if(/(^|\/)(\.git|node_modules|\.gradle|build|\.next|\.cache)(\/|$)/i.test(p))return true;
+  if(p.startsWith('dist/'))return true;
+  if(/(^|\/)(\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|local\.properties|capsule\.properties|id_rsa|id_ed25519)$/i.test(p))return true;
+  if(/\.(p12|pfx|jks|keystore|pem|key)$/i.test(p))return true;
+  return false;
+ };
+ /*
+  * 说明文件为什么被跳过 —— 让用户知道少了什么，而不是静默丢弃。
+  */
+ const skipReason=p=>{
+  if(p.startsWith('dist/client/web/'))return null;
+  if(p.startsWith('dist/admin/'))return '后台管理界面，手机应用用不到';
+  if(p==='dist/build-report.json')return '平台构建报告';
+  if(/(^|\/)node_modules(\/|$)/i.test(p))return '依赖目录，可重新安装';
+  if(/(^|\/)\.git(\/|$)/i.test(p))return '版本库目录';
+  if(/(^|\/)\.cache(\/|$)/i.test(p))return '缓存目录';
+  if(/(^|\/)build(\/|$)/i.test(p))return '构建中间产物';
+  if(p.startsWith('dist/'))return '构建中间产物';
+  if(/(^|\/)\.env(\..*)?$/i.test(p))return '平台后端连接信息，含密钥';
+  if(/(^|\/)credentials(\..*)?$/i.test(p))return '凭据文件';
+  if(/(^|\/)secrets?(\..*)?$/i.test(p))return '密钥文件';
+  if(/\.(p12|pfx|jks|keystore|pem|key)$/i.test(p))return '证书与私钥';
+  return null;
+ };
  const hash=async b=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',b)),x=>x.toString(16).padStart(2,'0')).join('');
  /*
   * 原生桥接：把大文件分块写进 App 私有暂存区。
@@ -121,13 +168,29 @@ var NeoCloud = (() => {
   return total;
  };
   const listing=async id=>{for(let attempt=0;attempt<45;attempt++){if(signal?.aborted)throw Error('操作已停止');const r=await fetch(pid(id)+'/files',{credentials:'same-origin',redirect:'error',signal,cache:'no-store'});if(r.ok)return await r.text();if(r.status!==503)throw Error(r.status===401||r.status===403?'请先登录 Studio':`文件列表读取失败（HTTP ${r.status}）`);progress('等待云端工作区准备…');await new Promise(resolve=>setTimeout(resolve,1000));}throw Error('云端工作区尚未就绪，项目关联已保留，请稍后重试')};
-  const read=async(id,initialize=false)=>{
+  const read=async(id,initialize=false,includeOptional=false)=>{
    await req(pid(id)+'/sandbox/ensure',{method:'POST'});await idle(id);
    if(initialize){progress('初始化新项目工作区…');const sessions=(await json(pid(id)+'/sessions')).sessions;if(!Array.isArray(sessions)||sessions.length!==1||typeof sessions[0].id!=='string')throw Error('新项目会话状态变化，请打开 Studio 核对');const requestId=crypto.randomUUID(),v=await json(pid(id)+'/workspace/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:sessions[0].id,command:{requestId,action:'status'}})});if(v.result?.requestId!==requestId||v.result.error||v.result.status?.busy!==false)throw Error('工作区未准备好，请稍后重试');}
    const meta=(await json(pid(id))).project;if(meta?.id!==id||typeof meta.name!=='string')throw Error('云端项目身份不匹配');
    const list=await listing(id);if(/^\s*</.test(list))throw Error('Studio 文件清单无效');
    const listed=list.split('\n').map(x=>x.trim()).filter(Boolean);if(listed.some(p=>!valid(p.endsWith('/')?p.slice(0,-1):p)))throw Error('云端文件路径无效');const names=listed.filter(p=>!p.endsWith('/'));if(new Set(names).size!==names.length)throw Error('云端文件路径无效');
-   const skipped=names.filter(excluded),included=names.filter(p=>!excluded(p));
+   /*
+    * 分三类：
+    *   safe     —— 默认同步
+    *   optional —— 跳过目录，但用户选「一起同步」时要带上
+    *   blocked  —— 绝不带（凭据、私钥）
+    *
+    * 为什么要有 optional：有些目录默认跳过是合理的（dist/admin 用不到），
+    * 但用户可能确实需要（79 MB 的识别模型就在 dist 里）。
+    * 判定标准不是「是不是构建产物」，而是「能不能重建」。
+    */
+   const isBlocked=p=>{
+    const why=skipReason(p);
+    return !!why&&/凭据|私钥|证书|口令/.test(why);
+   };
+   const blocked=names.filter(isBlocked);
+   const skipped=names.filter(p=>excluded(p)&&!isBlocked(p));
+   const included=names.filter(p=>!excluded(p)||(includeOptional&&!isBlocked(p)));
    if(included.length>COUNT)throw Error('项目有 '+included.length+' 个源文件，超过 '+COUNT+' 个上限，未进行部分同步。'
 +'云端项目本身文件过多时，建议在 Studio 里精简掉依赖目录（如 node_modules）后再同步。');
 
@@ -236,10 +299,57 @@ var NeoCloud = (() => {
     }
    }
    await idle(id);
-   return {project:{id,name:meta.name,builderType:meta.builderType||'app'},entries,skipped,bytes:total};
+   /*
+    * 统计跳过项，按原因归类 —— 用户要知道少了什么、为什么少。
+    * 静默丢弃最坏：以为文件都在，用到时才发现 79 MB 的模型没了。
+    */
+   const skipByReason={},blockedByReason={};
+   for(const p of skipped){
+    const why=skipReason(p);
+    if(why)skipByReason[why]=(skipByReason[why]||0)+1;
+   }
+   for(const p of names){
+    if(!isBlocked(p))continue;
+    const why=skipReason(p)||'敏感文件';
+    blockedByReason[why]=(blockedByReason[why]||0)+1;
+   }
+   return {project:{id,name:meta.name,builderType:meta.builderType||'app'},entries,skipped:skipped.filter(p=>!included.includes(p)),skipByReason,blockedByReason,bytes:total};
   };
   if(op.action==='list'){const v=await json('/api/projects');if(!Array.isArray(v.projects))throw Error('云端项目列表格式无效');return {projects:v.projects.map(p=>({id:p.id,name:p.name,builderType:p.builderType||'app'}))}}
-  if(op.action==='pull')return read(op.projectId,op.initialize===true);
+  /*
+   * 只探测清单，不下载。
+   *
+   * 为什么要这一步：云端项目里有些目录（依赖、构建产物）默认不同步，
+   * 但用户可能确实想要（比如 79 MB 的识别模型就在 dist 里）。
+   * 所以先让用户看到「要下什么、跳过什么」，选完再真下。
+   *
+   * 返回按"能不能带"分三档：
+   *   safe     —— 默认就同步的内容
+   *   optional —— 可选的（跳过目录，用户可勾选一起下）
+   *   blocked  —— 绝不带的（凭据、私钥：带了就是把别人的密钥搬到你这）
+   */
+  if(op.action==='probe'){
+   const meta=await json(pid(op.projectId));
+   const list=await listing(op.projectId);
+   if(typeof list!=='string')throw Error('Studio 文件清单无效');
+   const listed=list.split('\n').map(x=>x.trim()).filter(Boolean);
+   if(listed.some(p=>!valid(p.endsWith('/')?p.slice(0,-1):p)))throw Error('云端文件路径无效');
+   const names=listed.filter(p=>!p.endsWith('/'));
+   const groups={};
+   let safe=0,optional=0,blocked=0;
+   for(const p of names){
+    if(!excluded(p)){safe++;continue}
+    const why=skipReason(p)||'其他';
+    const isBlocked=/凭据|私钥|证书|口令/.test(why);
+    if(isBlocked){blocked++;continue}
+    optional++;
+    if(!groups[why])groups[why]={count:0};
+    groups[why].count++;
+   }
+   return {project:{id:op.projectId,name:meta.name||'',builderType:meta.builderType||'app'},
+           total:names.length,safe:safe,optional:optional,blocked:blocked,groups:groups};
+  }
+  if(op.action==='pull')return read(op.projectId,op.initialize===true,op.includeOptional===true);
   if(op.action==='create'){
    const v=await json('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:op.name,projectType:'web',builderType:'app',productType:'app',model:'auto',description:'从 StepX Studio 上传的本地项目'})});
    if(!v.project?.id)throw Error('创建结果未知，请先刷新云端项目列表，不要重复上传');
