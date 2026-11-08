@@ -150,13 +150,19 @@ final class CloudProjects {
   */
  void pull(String id,boolean includeOptional)throws Exception{available();JSONObject old=find(id);final String localId=old==null?"":old.getString("id");final JSONObject before=old==null?new JSONObject():CloudFiles.entries(old);
   execute(op("pull").put("projectId",id).put("includeOptional",includeOptional),r->{JSONObject remote=r.getJSONObject("entries"),meta=r.getJSONObject("project");CloudFiles.validate(remote);JSONObject p;
-   synchronized(a){JSONObject backup=new JSONObject(a.state.toString());try{if(localId.isEmpty()){p=new JSONObject().put("id",UUID.randomUUID().toString()).put("name",meta.getString("name")).put("files",new JSONObject()).put("cloudSource",true);}else{p=new JSONObject(a.byId("projects",localId).toString());if(!ProjectEdits.same(CloudFiles.hashes(before),CloudFiles.hashes(CloudFiles.entries(p))))throw new Exception("同步期间本地文件已修改，没有覆盖");}
+   synchronized(a){
+     /*
+      * 只备份要改的那一个项目（云端同步只动一个项目）。
+      * 备份整个 state 会一次吃掉上百 MB —— 手机上直接 OOM。
+      */
+     JSONObject backupProject=localId.isEmpty()?null:new JSONObject(a.byId("projects",localId).toString());
+     try{if(localId.isEmpty()){p=new JSONObject().put("id",UUID.randomUUID().toString()).put("name",meta.getString("name")).put("files",new JSONObject()).put("cloudSource",true);}else{p=new JSONObject(a.byId("projects",localId).toString());if(!ProjectEdits.same(CloudFiles.hashes(before),CloudFiles.hashes(CloudFiles.entries(p))))throw new Exception("同步期间本地文件已修改，没有覆盖");}
     JSONObject c=p.optJSONObject("cloud"),base=c==null?new JSONObject():c.optJSONObject("base");if(base==null)base=new JSONObject();
     // 大文件先从暂存区搬进项目的大文件目录，再参与合并 ——
     // 暂存区是一次性的，合并后项目必须自给自足。
     materializeBig(id,remote);
     JSONObject merged=CloudFiles.merge(before,remote,base);if(!localId.isEmpty())CloudFiles.snapshot(p);CloudFiles.assign(p,merged,a.getFilesDir());p.put("updated",System.currentTimeMillis()).put("cloudSource",true).put("studioUrl",url(meta));p.put("cloud",new JSONObject().put("id",id).put("name",meta.getString("name")).put("builderType",meta.optString("builderType","app")).put("base",CloudFiles.hashes(remote)).put("lastPull",System.currentTimeMillis()).put("skipped",r.optJSONArray("skipped")).put("skipReasons",r.optJSONObject("skipByReason")).put("message","已同步 "+remote.length()+" 个云端源文件；本地独立修改保留"));a.upsert("projects",p);
-   }catch(Exception e){a.state=backup;throw e;}}
+   }catch(Exception e){if(backupProject!=null)a.replaceProject(backupProject);throw e;}}
    // 大文件落盘情况记到日志。排障时能直接看出哪个大文件、多大、哈希多少，
    // 不用去翻应用私有目录。
    try{

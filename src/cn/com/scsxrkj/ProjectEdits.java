@@ -64,7 +64,29 @@ final class ProjectEdits {
   if(!same(p.getJSONObject("files"),base))throw new Exception("文件已变化，本轮建议未写入；请基于最新文件重新发送");
   JSONObject next=new JSONObject(base.toString());Iterator<String> it=changes.keys();while(it.hasNext()){String n=it.next();if(changes.isNull(n)){if(!next.has(n))throw new Exception("不能删除不存在的文件："+n);next.remove(n);}else{if(!(changes.get(n) instanceof String))throw new Exception("文件内容必须是文本");next.put(n,changes.getString(n));}}if(next.has("neo-matrix.json"))cn.com.scsxrkj.matrix.MatrixSpec.parse(next.getString("neo-matrix.json"));if(p.optBoolean("cloudSource")){JSONObject temp=new JSONObject(p.toString()).put("files",next);CloudFiles.entries(temp);}else validate(next,base);
   JSONObject out=new JSONObject(p.toString());if(same(next,base))return out;
-  JSONArray snaps=out.optJSONArray("snapshots");if(snaps==null)snaps=new JSONArray();JSONArray kept=new JSONArray();for(int i=Math.max(0,snaps.length()-4);i<snaps.length();i++)kept.put(snaps.get(i));kept.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",new JSONObject(base.toString())));out.put("snapshots",kept).put("files",next).put("updated",System.currentTimeMillis());
+  /*
+    * 存档只存**这次改动的文件的旧内容**，不存整个项目。
+    *
+    * <p>原来存的是整个 base（项目全部文件）。一个 300 个文件的项目，
+    * 改 5 次就是 5 份全量 —— workspace.json 直接涨到几 MB，
+    * 而内存里再拷几遍就 OOM。
+    *
+    * <p>改成差量：每份快照只记「哪些文件被改了 + 改之前的���容」。
+    * 恢复时把差量叠回去就行，体积从 O(项目大小 × 次数) 降到 O(改动量 × 次数)。
+    *
+    * <p>同时只留 2 份 —— 再多用户也用不上，而每份都是内存负担。
+    */
+   JSONArray snaps=out.optJSONArray("snapshots");if(snaps==null)snaps=new JSONArray();JSONArray kept=new JSONArray();for(int i=Math.max(0,snaps.length()-1);i<snaps.length();i++)kept.put(snaps.get(i));
+   JSONObject delta=new JSONObject();
+   JSONArray added=new JSONArray();
+   for(Iterator<String> dit=changes.keys();dit.hasNext();){
+    String n=dit.next();
+    if(base.has(n))delta.put(n,base.optString(n,""));
+    // 当时没有这个文件（这次是新建的）→ 用 NULL 标记，恢复时要删掉
+    else delta.put(n,JSONObject.NULL);
+   }
+   kept.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("added",added).put("delta",true));
+   out.put("snapshots",kept).put("files",next).put("updated",System.currentTimeMillis());
   JSONArray h=out.optJSONArray("history");if(h==null)h=new JSONArray();h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","apply").put("text",source+" · "+changes.length()+" 个文件；运行验收待完成。"));out.put("history",h);return out;
  }
  static String sourceInstructions(){return "你正在修改云端项目的本地源码副本。返回严格 JSON：{\"summary\":\"说明\",\"files\":{\"相对路径\":\"完整内容\"}}。只列需要修改的文本文件；删除用null。保留其他文件。允许子目录和TSX等源码，不可直接修改凭据、签名材料或二进制资源；新图片使用generate_image工具保存后引用。不执行shell、不假装完成构建；可在工作台本地运行支持的前端工程；发布构建仍可上传Studio。保持用户项目品牌，不擅自添加模型厂商联名或接入成功宣传。需要看具体文件内容时用 read_file，需要定位时用 search_code，改动前先读。";}

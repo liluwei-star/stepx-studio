@@ -534,39 +534,392 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   *       免得界面上永远显示一个转圈的请求</li>
   * </ol>
   */
- synchronized void loadState(){try{AtomicFile f=new AtomicFile(new File(getFilesDir(),"workspace.json"));state=new JSONObject(new String(f.readFully(),StandardCharsets.UTF_8));}catch(Exception e){state=new JSONObject();}try{for(String k:new String[]{"profiles","projects","chats","usage","projectTrash","artProfiles","artJobs"})if(!state.has(k))state.put(k,new JSONArray());JSONObject pending=state.optJSONObject("pendingAi");if(pending!=null){try{JSONObject c=byId("chats",pending.optString("chatId"));c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content","上次生成因应用退出或系统回收而中断，未完成的代码没有写入。项目已保留，可继续发送需求；运行本地大模型时可降低上下文并关闭录屏后重试。"));}catch(Exception ignored){}state.getJSONArray("usage").put(new JSONObject(pending.toString()).put("status","interrupted").put("usage",new JSONObject().put("known",false)));state.remove("pendingAi");saveState();}}catch(Exception ignored){}}
- /** 把内存里的用户数据写回 workspace.json。用 AtomicFile 保证写入的原子性。 */
- synchronized void saveState()throws Exception{AtomicFile f=new AtomicFile(new File(getFilesDir(),"workspace.json"));FileOutputStream out=f.startWrite();try{out.write(state.toString().getBytes(StandardCharsets.UTF_8));f.finishWrite(out);}catch(Exception e){f.failWrite(out);throw e;}}
+ synchronized void loadState(){try{AtomicFile f=new AtomicFile(new File(getFilesDir(),"workspace.json"));state=new JSONObject(new String(f.readFully(),StandardCharsets.UTF_8));}catch(Exception e){state=new JSONObject();}try{for(String k:new String[]{"profiles","projects","chats","usage","projectTrash","artProfiles","artJobs"})if(!state.has(k))state.put(k,new JSONArray());
+   /*
+    * 清理旧版本留下的肥大数据。
+    *
+    * <p>老版本把三样东西整个塞进 workspace.json：
+    * · 每个项目的<b>完整文件副本</b>（history[].editBase）—— 一份就是几 MB；
+    * · 每项目五份<b>全量恢复存档</b>（snapshots）—— 又几 MB；
+    * · 工具调用<b>结果全文</b>（messages[].toolCalls）—— read_file 读回来的文件内容。
+    *
+    * <p>实测一个用了几天的工作台 workspace.json 涨到 36 MB。
+    * 加载时先读成 72 MB 的字符串，解析又要 72 MB —— 手机的堆只有 256 MB，
+    * 光是打开 App 就能被干掉。
+    *
+    * <p>这三样都是「派生数据」：editBase 能从当前文件重建，
+    * 全量存档能重新生成，工具结果模型那轮已经看过了。
+    * 删掉不丢用户资产，只丢历史痕迹。
+    */
+   boolean cleaned=false;
+   JSONArray prs0=state.optJSONArray("projects");
+   if(prs0!=null)for(int i=0;i<prs0.length();i++){
+    JSONObject pr=prs0.optJSONObject(i);
+    if(pr==null)continue;
+    /* ① history[].editBase：整个项目的副本 */
+    JSONArray h=pr.optJSONArray("history");
+    if(h!=null)for(int hi=0;hi<h.length();hi++){
+     JSONObject ho=h.optJSONObject(hi);
+     if(ho==null)continue;
+     JSONObject eb=ho.optJSONObject("editBase");
+     if(eb!=null){
+      ho.put("editBaseHash",Integer.toHexString(eb.toString().hashCode()));
+      ho.remove("editBase");
+      cleaned=true;
+     }
+    }
+    /*
+     * ② snapshots：老版本存的是**全量**存档（整个项目文件表），五份就是几 MB。
+     *
+     * <p>清成差量：把「存档内容」与「当前内容」比一遍，只留**不一样**的文件的旧值。
+     * 一样的不用存 —— 恢复时本来就还是那个值。
+     *
+     * <p>这样一份 300 文件的项目，存档从几 MB 降到几 KB。
+     */
+    JSONArray snaps=pr.optJSONArray("snapshots");
+    if(snaps!=null&&snaps.length()>0){
+     JSONObject cur=pr.optJSONObject("files");
+     JSONArray keep=new JSONArray();
+     for(int si=Math.max(0,snaps.length()-2);si<snaps.length();si++){
+      JSONObject s=snaps.optJSONObject(si);
+      if(s==null)continue;
+      if(s.optBoolean("delta",false)){keep.put(s);continue;}
+      /* 全量 → 差量：只留与当前不同的文件的旧内容 */
+      JSONObject sf=s.optJSONObject("files");
+      JSONObject delta=new JSONObject();
+      JSONArray added=new JSONArray();
+      if(sf!=null)for(java.util.Iterator<String> it=sf.keys();it.hasNext();){
+       String n=it.next();
+       String oldV=sf.optString(n,"");
+       String nowV=cur==null?null:cur.optString(n,null);
+       // 当前没有这个文件（当时是新增的），恢复时要删掉 → 用 null 标记
+       if(nowV==null||!nowV.equals(oldV))delta.put(n,nowV==null?JSONObject.NULL:oldV);
+      }
+      /*
+       * 差量只记「存档里有、当前也有的文件」，那么
+       * 「当前有、存档里没有」的文件就是那之后**新增**的 —— 恢复时要删掉。
+       * 不记这个名单，恢复后新建的文件会留在那儿，回不到当时的样子。
+       */
+      if(cur!=null)for(java.util.Iterator<String> it=cur.keys();it.hasNext();){
+       String n=it.next();
+       if(sf==null||!sf.has(n))added.put(n);
+      }
+      JSONObject nc=new JSONObject().put("time",s.optLong("time")).put("files",delta).put("added",added).put("delta",true);
+      keep.put(nc);
+      cleaned=true;
+     }
+     pr.put("snapshots",keep);
+    }
+    /* ②-2 base64 二进制搬到磁盘 —— workspace.json 里只留文件名 */
+    try{cleaned=CloudFiles.externalizeBinaries(pr,getFilesDir())>0||cleaned;}catch(Exception ignored){}
+   }
+   /* ③ 对话里的工具结果全文 */
+   JSONArray chs0=state.optJSONArray("chats");
+   if(chs0!=null)for(int ci=0;ci<chs0.length();ci++){
+    JSONObject ch=chs0.optJSONObject(ci);
+    if(ch==null)continue;
+    JSONArray msgs=ch.optJSONArray("messages");
+    if(msgs==null)continue;
+    for(int mi=0;mi<msgs.length();mi++){
+     JSONObject m=msgs.optJSONObject(mi);
+     if(m==null)continue;
+     JSONArray tc=m.optJSONArray("toolCalls");
+     if(tc!=null){
+      JSONArray brief=new JSONArray();
+      for(int ti=0;ti<tc.length();ti++){
+       JSONObject call=tc.optJSONObject(ti);
+       if(call==null)continue;
+       brief.put(new JSONObject().put("name",call.optString("name")).put("ok",!call.has("error")));
+      }
+      m.put("toolCalls",brief);
+      cleaned=true;
+     }
+     /* ③-2 edit.base / edit.files：整个项目文件表，一个项目就是几 MB */
+     JSONObject ed=m.optJSONObject("edit");
+     if(ed!=null&&(ed.has("base")||ed.has("files"))){
+      m.put("edit",editSummary(ed));
+      cleaned=true;
+     }
+    }
+   }
+   if(cleaned)saveState();
+   JSONObject pending=state.optJSONObject("pendingAi");if(pending!=null){try{JSONObject c=byId("chats",pending.optString("chatId"));c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content","上次生成因应用退出或系统回收而中断，未完成的代码没有写入。项目已保留，可继续发送需求；运行本地大模型时可降低上下文并关闭录屏后重试。"));}catch(Exception ignored){}state.getJSONArray("usage").put(new JSONObject(pending.toString()).put("status","interrupted").put("usage",new JSONObject().put("known",false)));state.remove("pendingAi");saveState();}}catch(Exception ignored){}}
+ /*
+  * 把内存里的用户数据写回 workspace.json。用 AtomicFile 保证写入的原子性。
+  *
+  * <p>不写成 `state.toString().getBytes()` —— 那是**两份**大对象：
+  * String（UTF-8 下每个字符 2 字节）加上 byte[]。
+  * state 要是 30 MB，这里就是 60 MB + 30 MB 峰值。
+  *
+  * <p>改成把 JSON 直接写进流：{@code JSONTokener} 逐段读进内存，
+  * 省掉那个巨大的中间字符串。
+  */
+ synchronized void saveState()throws Exception{
+  AtomicFile f=new AtomicFile(new File(getFilesDir(),"workspace.json"));
+  FileOutputStream out=f.startWrite();
+  try{
+   /*
+    * 分块写，不做 state.toString()。
+    *
+    * <p>state.toString() 会把整个 state 拼成**一个** String。
+    * Java 的 String 在 UTF-8 下按 2 字节/字符算，
+    * 30 MB 的 workspace 就是 60 MB 的 String，再加 30 MB 的 byte[] ——
+    * 一次保存就把堆推到 90 MB，手机上必然 OOM。
+    *
+    * <p>改成逐个顶层键写：{"key":<值>,...}。
+    * 每个值单独序列化再写出去，最大的那一块是单个项目的文件表
+    * （几 MB），而不是整个 state。
+    */
+   java.io.OutputStreamWriter w=new java.io.OutputStreamWriter(out,StandardCharsets.UTF_8);
+   w.write('{');
+   boolean first=true;
+   for(java.util.Iterator<String> it=state.keys();it.hasNext();){
+    String k=it.next();
+    if(!first)w.write(',');
+    first=false;
+    w.write(JSONObject.quote(k));
+    w.write(':');
+    Object v=state.opt(k);
+    w.write(v==null?"null":(v instanceof JSONObject||v instanceof JSONArray?v.toString():JSONObject.quote(String.valueOf(v))));
+   }
+   w.write('}');
+   w.flush();
+   f.finishWrite(out);
+  }catch(Exception e){f.failWrite(out);throw e;}
+ }
  /**
   * 生成给前端用的状态快照。
   *
-  * <p>和 {@link #state} 的区别：这里会把 API Key 换成 {@code hasKey} 布尔值，
-  * 密钥本身永远不会传给网页，避免被页面脚本读走。
-  */
- synchronized JSONObject publicState()throws Exception{JSONObject c=new JSONObject(state.toString());c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);JSONArray ap=c.getJSONArray("artProfiles");for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.getJSONArray("profiles");for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));
+   * <p>和 {@link #state} 的区别有两处：
+   * <ol>
+   * <li>API Key 换成 {@code hasKey} 布尔值，密钥本身永远不会传给网页，
+   *     避免被页面脚本读走。</li>
+   * <li><b>必须「瘦」。</b>这里曾经直接 {@code new JSONObject(state.toString())}
+   *     把整个 state 抄一份，而 state 里装着每个项目的<b>完整文件内容</b>、
+   *     二进制 base64、五份恢复快照、AI 工具结果全文 —— 实测一个用了几天
+   *     的工作台 workspace.json 涨到 36 MB。</li>
+   * </ol>
+   *
+   * <p>后果不是「慢」，是<b>崩</b>：Java String 在 UTF-8 下一个字符占 2 字节，
+   * {@code state.toString()} 拼一次 36 MB 的串要 72 MB 内存，再拼一次又是 72 MB，
+   * 而手机给普通 App 的堆上限只有 256 MB —— {@code onResume} 里发一次 state
+   * 就 {@code OutOfMemoryError}，App 直接闪退，之后再也起不来。
+   *
+   * <p>所以这里的规矩是：<b>前端要什么给什么，不给原样转发。</b>
+   * <ul>
+   * <li>文件内容不进快照 —— 前端需要时用 {@code Neo.readFile()} 按需取单个文件；</li>
+   * <li>恢复快照只给「有哪些、什么时候」，内容留在本地；</li>
+   * <li>对话历史里的工具结果只给摘要。</li>
+   * </ul>
+   */
+ synchronized JSONObject publicState()throws Exception{
+   /*
+    * 逐项构造，不做 `new JSONObject(state.toString())`。
+    *
+    * <p>后者会把整个 state 序列化成一个 36 MB 的字符串再解析回来 ——
+    * 序列化时 72 MB、解析后又是 72 MB，一来一回 144 MB 峰值。
+    * 即便后面把内容都删掉，这一下也已经把堆撑爆了。
+    *
+    * <p>所以这里改成：顶层键逐个放，需要瘦身的地方单独处理。
+    */
+   JSONObject c=new JSONObject();
+   for(java.util.Iterator<String> it=state.keys();it.hasNext();){
+    String k=it.next();
+    // 顶层数组（projects / chats / usage 等）逐个处理，需要瘦身的在下面单独处理
+    c.put(k,state.opt(k));
+   }
+   c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);JSONArray ap=c.getJSONArray("artProfiles");for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.getJSONArray("profiles");for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));
   // 给每个项目补上二进制文件的大小，供文件浏览器显示。
   // 文本文件的大小前端自己算得了（字符串长度），二进制不行 ——
   // base64 的原文长度看不出来，大文件的 .bin 引用更是只有个名字。
-  JSONArray prs=c.getJSONArray("projects");
-  for(int i=0;i<prs.length();i++){
-   JSONObject pr=prs.getJSONObject(i),sizes=new JSONObject();
-   JSONObject bf=pr.optJSONObject("binaryFiles");
-   if(bf!=null)for(java.util.Iterator<String> k=bf.keys();k.hasNext();){
-    String n=k.next(),v=bf.optString(n,"");
-    long sz;
-    if(v.endsWith(".bin")){
-     // 大文件：内容在 project-files 里，读文件长度（只读元数据，很快）
-     File f=new File(new File(getFilesDir(),"project-files"),v);
-     sz=f.isFile()?f.length():-1;
-    }else{
-     // 普通二进制存 base64，按长度换算
-     sz=(long)v.length()*3/4;
+   /*
+    * ── 项目：逐个造一份瘦身后的副本 ──────────────────────────
+    *
+    * <p>注意是**造新对象**，不是就地改。
+    * `state.opt("projects")` 拿回来的是 state 里的原对象，
+    * 在它身上 put("files", 清单) 会把真实文件内容直接抹掉 ——
+    * 那不是瘦身，是删数据。
+    */
+   JSONArray srcProjects=state.optJSONArray("projects");
+   JSONArray prs=new JSONArray();
+   if(srcProjects!=null)for(int i=0;i<srcProjects.length();i++){
+    JSONObject src=srcProjects.optJSONObject(i);
+    if(src==null)continue;
+    JSONObject pr=new JSONObject();
+    /* 先把所有字段原样搬过来（浅拷贝，嵌套对象仍共享引用） */
+    for(java.util.Iterator<String> it=src.keys();it.hasNext();){
+     String k=it.next();
+     Object v=src.opt(k);
+     /* 这四个是要瘦身的，跳过，下面单独处理 */
+     if("files".equals(k)||"binaryFiles".equals(k)||"snapshots".equals(k)||"history".equals(k))continue;
+     pr.put(k,v);
     }
-    sizes.put(n,sz);
+    /* ① 文件内容：只留路径清单和字节数，内容另取 */
+    JSONObject tf=src.optJSONObject("files");
+    JSONObject names=new JSONObject();
+    if(tf!=null)for(java.util.Iterator<String> it=tf.keys();it.hasNext();){
+     String n=it.next();
+     names.put(n,tf.optString(n,"").length());
+    }
+    pr.put("files",names);
+    pr.put("filesAreList",true);
+    /* ② 二进制：base64 内容一律不给，只留引用名 */
+    JSONObject bf=src.optJSONObject("binaryFiles");
+    JSONObject refs=new JSONObject(),sizes=new JSONObject();
+    if(bf!=null)for(java.util.Iterator<String> it=bf.keys();it.hasNext();){
+     String n=it.next(),v=bf.optString(n,"");
+     if(v.endsWith(".bin")){
+      // 大文件：内容在 project-files 里，读文件长度（只读元数据，很快）
+      File f=new File(new File(getFilesDir(),"project-files"),v);
+      refs.put(n,v);
+      sizes.put(n,f.isFile()?f.length():-1);
+     }else{
+      // 普通二进制存 base64，按长度换算
+      refs.put(n,"");
+      sizes.put(n,(long)v.length()*3/4);
+     }
+    }
+    pr.put("binaryFiles",refs);
+    pr.put("binarySizes",sizes);
+    pr.put("binaryAreRefs",true);
+    /* ③ 恢复快照：只留「什么时候」和「有哪些文件」，内容留在本地 */
+    JSONArray snaps=src.optJSONArray("snapshots");
+    JSONArray meta=new JSONArray();
+    if(snaps!=null)for(int si=0;si<snaps.length();si++){
+     JSONObject s=snaps.optJSONObject(si);
+     if(s==null)continue;
+     JSONObject sf=s.optJSONObject("files");
+     JSONArray list=new JSONArray();
+     if(sf!=null)for(java.util.Iterator<String> it=sf.keys();it.hasNext();)list.put(it.next());
+     meta.put(new JSONObject().put("time",s.optLong("time")).put("files",list).put("delta",s.optBoolean("delta",false)));
+    }
+    pr.put("snapshots",meta);
+    pr.put("snapshotsAreMeta",true);
+    /* ④ 编辑基线：editBase 是整个项目的文件副本，几十万字符起步，留哈希就够 */
+    JSONArray hist=src.optJSONArray("history");
+    JSONArray hOut=new JSONArray();
+    if(hist!=null)for(int hi=0;hi<hist.length();hi++){
+     JSONObject h=hist.optJSONObject(hi);
+     if(h==null)continue;
+     JSONObject hc=new JSONObject();
+     for(java.util.Iterator<String> it=h.keys();it.hasNext();){
+      String k=it.next();
+      if("editBase".equals(k))continue;
+      hc.put(k,h.opt(k));
+     }
+     JSONObject eb=h.optJSONObject("editBase");
+     if(eb!=null)hc.put("editBaseHash",Integer.toHexString(eb.toString().hashCode()));
+     hOut.put(hc);
+    }
+    pr.put("history",hOut);
+    prs.put(pr);
    }
-   pr.put("binarySizes",sizes);
-  }
+   c.put("projects",prs);
+   /*
+    * ── 对话：工具结果全文留着给模型回看，但不给前端 ──────────
+    */
+   JSONArray srcChats=state.optJSONArray("chats");
+   JSONArray chs=new JSONArray();
+   if(srcChats!=null)for(int ci=0;ci<srcChats.length();ci++){
+    JSONObject sc=srcChats.optJSONObject(ci);
+    if(sc==null)continue;
+    JSONObject ch=new JSONObject();
+    for(java.util.Iterator<String> it=sc.keys();it.hasNext();){
+     String k=it.next();
+     if("messages".equals(k))continue;
+     ch.put(k,sc.opt(k));
+    }
+    JSONArray srcMsgs=sc.optJSONArray("messages");
+    JSONArray msgs=new JSONArray();
+    if(srcMsgs!=null)for(int mi=0;mi<srcMsgs.length();mi++){
+     JSONObject sm=srcMsgs.optJSONObject(mi);
+     if(sm==null)continue;
+     JSONObject m=new JSONObject();
+     for(java.util.Iterator<String> it=sm.keys();it.hasNext();){
+      String k=it.next();
+      if("toolCalls".equals(k))continue;
+      m.put(k,sm.opt(k));
+     }
+     JSONArray tc=sm.optJSONArray("toolCalls");
+     if(tc!=null){
+      JSONArray brief=new JSONArray();
+      for(int ti=0;ti<tc.length();ti++){
+       JSONObject call=tc.optJSONObject(ti);
+       if(call==null)continue;
+       brief.put(new JSONObject().put("name",call.optString("name")).put("ok",call.optBoolean("ok",true)));
+      }
+      m.put("toolCalls",brief);
+      m.put("toolCallsBrief",true);
+     }
+     /* edit.base / edit.files 是整个项目文件表，一个就几 MB —— 不给前端 */
+     JSONObject ed=sm.optJSONObject("edit");
+     if(ed!=null&&(ed.has("base")||ed.has("files"))){
+      m.put("edit",editSummary(ed));
+      m.put("editBrief",true);
+     }
+     msgs.put(m);
+    }
+    ch.put("messages",msgs);
+    chs.put(ch);
+   }
+   c.put("chats",chs);
+
+
   return c;}
+ /*
+  * 把工具调用记录压成摘要。
+  *
+  * <p>工具结果里有 {@code read_file} 读回来的**整个文件内容** ——
+  * 一个几百 KB 的文件进对话历史，再乘上几十轮，workspace.json 就能涨到几十 MB。
+  * 而且这些内容模型那轮已经看过了，存下来只是浪费。
+  *
+  * <p>所以只留「调了什么工具、成没成、结果多长」。
+  */
+ JSONArray toolCallSummary(JSONArray calls)throws Exception{
+  JSONArray out=new JSONArray();
+  if(calls==null)return out;
+  for(int i=0;i<calls.length();i++){
+   JSONObject c=calls.optJSONObject(i);
+   if(c==null)continue;
+   JSONObject brief=new JSONObject().put("name",c.optString("name")).put("ok",!c.has("error"));
+   String body=c.optString("result","");
+   if(!body.isEmpty())brief.put("resultBytes",body.length());
+   String err=c.optString("error","");
+   if(!err.isEmpty())brief.put("error",err.length()>300?err.substring(0,300):err);
+   out.put(brief);
+  }
+  return out;
+ }
+
+ /*
+  * 把一次改动的记录压成摘要。
+  *
+  * <p>{@code edit.base} 是改之前的**整个项目文件表**，
+  * {@code edit.files} 是这次改的文件全文 —— 两者加起来一个项目就是几 MB。
+  * 存进对话历史后，一段十轮的对话能撑出几十 MB 的 workspace.json。
+  *
+  * <p>对话历史要回答的是「当时改了什么、什么状态」，不是「每个文件的完整内容」。
+  * 所以只留：改了哪些文件、状态、以及基线的哈希。
+  */
+ JSONObject editSummary(JSONObject edit)throws Exception{
+  if(edit==null)return null;
+  JSONObject out=new JSONObject();
+  for(java.util.Iterator<String> it=edit.keys();it.hasNext();){
+   String k=it.next();
+   if("base".equals(k)||"files".equals(k))continue;
+   out.put(k,edit.opt(k));
+  }
+  JSONObject files=edit.optJSONObject("files");
+  if(files!=null){
+   JSONArray names=new JSONArray();
+   for(java.util.Iterator<String> it=files.keys();it.hasNext();)names.put(it.next());
+   out.put("changedFiles",names);
+  }
+  JSONObject base=edit.optJSONObject("base");
+  if(base!=null)out.put("baseHash",Integer.toHexString(base.toString().hashCode()));
+  return out;
+ }
+
  /** 把状态快照推给本地界面（页面里的 receive('state', ...)）。 */
  void sendState(){try{event("state",publicState());}catch(Exception e){toast("读取本地资料失败");}}
  /**
@@ -575,7 +928,31 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   * @param type 事件名，如 state / reply / error / busy / building
   * @param data 事件数据，对象或数组会原样序列化，其他类型转成字符串
   */
- void event(String type,Object data){runOnUiThread(()->{if(isDestroyed()||isFinishing())return;desk.evaluateJavascript("window.receive&&receive("+JSONObject.quote(type)+","+(data instanceof JSONObject||data instanceof JSONArray?data.toString():JSONObject.quote(String.valueOf(data)))+")",null);});}
+ void event(String type,Object data){
+   runOnUiThread(()->{
+    if(isDestroyed()||isFinishing())return;
+    /*
+     * 数据用 JSON 参数传，不拼进 JS 源码。
+     *
+     * <p>原来是把 data.toString() 直接拼成 `receive("state",{...})` 的源码。
+     * 拼接本身不额外占内存（data.toString() 已经是 String），
+     * 但**同一份大字符串会同时存在三份**：state.toString() 的结果、
+     * publicState() 里 copy 出来的副本、以及拼进 JS 源码后的新串。
+     * 36 MB 的 state 在 UTF-8 下每个字符 2 字节，三份就是 216 MB ——
+     * 加上其他开销，直接撞穿 256 MB 的堆上限。
+     *
+     * <p>真正的解法是别让 state 变大（见 publicState 的瘦身），
+     * 这一层只是不再额外制造副本。
+     */
+    String js;
+    if(data instanceof JSONObject||data instanceof JSONArray){
+     js="window.receive&&receive("+JSONObject.quote(type)+","+data.toString()+")";
+    }else{
+     js="window.receive&&receive("+JSONObject.quote(type)+","+JSONObject.quote(String.valueOf(data))+")";
+    }
+    desk.evaluateJavascript(js,null);
+   });
+  }
  /**
   * 在某个列表里按 id 找一条记录。
   *
@@ -599,7 +976,24 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   if(active!=null||link.running||IntegrationActivity.busy)throw new Exception("请先等待当前 AI 任务结束，再删除对话");
   final JSONArray ids=ChatHistory.existingIds(state,requested);if(ids.length()==0)return;
   new AlertDialog.Builder(this).setTitle("删除 "+ids.length()+" 段对话？").setMessage("删除后无法恢复。项目文件和 Token 账本会保留。").setNegativeButton("取消",null).setPositiveButton("删除",(dialog,which)->{
-   try{synchronized(MainActivity.this){if(active!=null||link.running||IntegrationActivity.busy)throw new Exception("AI 任务正在运行，请结束后重试");JSONObject next=new JSONObject(state.toString());JSONArray removed=ChatHistory.remove(next,ids);JSONObject old=state;state=next;try{saveState();}catch(Exception e){state=old;throw e;}event("chatsDeleted",removed);}}catch(Exception e){event("error",safeError(e));}
+   try{synchronized(MainActivity.this){if(active!=null||link.running||IntegrationActivity.busy)throw new Exception("AI 任务正在运行，请结束后重试");
+      /*
+       * 只备份「要删的那几条对话」，不备份整个 state。
+       * 整个 state 可能有几十 MB（项目文件全文），
+       * new JSONObject(state.toString()) 会一次吃掉上百 MB —— 手机上直接 OOM。
+       */
+      JSONArray oldOnes=new JSONArray();
+      for(int i=0;i<ids.length();i++){
+       try{oldOnes.put(byId("chats",ids.getString(i)));}catch(Exception ignored){}
+      }
+      JSONArray removed=ChatHistory.remove(state,ids);
+      try{saveState();}catch(Exception e){
+       // 回滚：把删掉的对话放回去
+       JSONArray chats=state.getJSONArray("chats");
+       for(int i=0;i<oldOnes.length();i++)chats.put(oldOnes.getJSONObject(i));
+       throw e;
+      }
+      event("chatsDeleted",removed);}}catch(Exception e){event("error",safeError(e));}
   }).show();
  }
  /**
@@ -699,6 +1093,51 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   @JavascriptInterface public boolean wantsNewProject(String text){return ProjectCreation.requested(text);}
   @JavascriptInterface public String appearance(){return prefs.getString("appearance","glass");}
   @JavascriptInterface public String read(){try{return publicState().toString();}catch(Exception e){return "{}";}}
+  /*
+   * 取单个文本文件的内容。
+   *
+   * <p>为什么需要它：状态快照不能带文件内容（会把内存撑爆，见 {@link #publicState}），
+   * 但编辑器、全局替换、搜索、预览都要读到内容。
+   * 所以内容按需取 —— 打开一个文件取一个，不是一次把整个项目搬过来。
+   *
+   * <p>参数是项目 id 和项目内相对路径。路径必须落在项目目录内，
+   * 越界（{@code ../}、绝对路径）一律拒绝。
+   *
+   * @param projectId 项目 id
+   * @param path      项目内相对路径
+   * @return 文件内容；不存在或出错时返回空串
+   */
+  @JavascriptInterface public String readFile(String projectId,String path){
+   try{
+    if(projectId==null||path==null||path.isEmpty())return "";
+    JSONObject pr=byId("projects",projectId);
+    JSONObject tf=pr.optJSONObject("files");
+    if(tf==null)return "";
+    // 路径不许越出项目
+    if(path.startsWith("/")||path.contains(".."))return "";
+    return tf.optString(path,"");
+   }catch(Exception e){return "";}
+  }
+  /*
+   * 取一份恢复快照的完整内容。
+   *
+   * <p>快照在快照列表里只留了文件名，用这个按序号取回完整内容。
+   *
+   * @param projectId 项目 id
+   * @param index     快照序号（0 是最早那份）
+   * @return 快照里的文件内容（JSON）；出错时返回空对象
+   */
+  @JavascriptInterface public String readSnapshot(String projectId,int index){
+   try{
+    JSONObject pr=byId("projects",projectId);
+    JSONArray snaps=pr.optJSONArray("snapshots");
+    if(snaps==null||index<0||index>=snaps.length())return "{}";
+    JSONObject s=snaps.optJSONObject(index);
+    if(s==null)return "{}";
+    JSONObject sf=s.optJSONObject("files");
+    return sf==null?"{}":sf.toString();
+   }catch(Exception e){return "{}";}
+  }
  /*
   * 让用户从相册选一张图当对话附件。
   *
@@ -742,7 +1181,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    /* 开始自动联动：AI 自动连续执行多步任务 */ case "autoStart":if(!aiEnabled())throw new Exception("AI助手已关闭，请在更多菜单开启");link.request(p);break;/* 停止自动联动 */ case "autoStop":link.stop("用户停止联动");break;
    /* 切换界面风格（玻璃 / 纯色 / 高对比） */ case "appearance":String mode=p.optString("value","glass");if(Arrays.asList("glass","solid","contrast").contains(mode)){prefs.edit().putString("appearance",mode).apply();updateNavigation();}break;
    /* 把项目编译成可安装的 APK */ case "buildApk":android.util.Log.i("NeoBuild","begin id="+p.optString("id")+" pkg="+p.optString("pkg")+" min="+p.optBoolean("minPermissions"));buildProject(p.getString("id"),p.optBoolean("install"),p.optString("pkg",""),p.optBoolean("minPermissions",false));android.util.Log.i("NeoBuild","queued building="+building);break;/* 把构建好的 APK 导出到手机存储 */ case "exportApk":exportApk(p);break;/* 安装构建好的 APK */ case "installApk":installApk(p);break;/* 导入生成的 App 回传的调试报告 */ case "importDebug":startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE),23);break;
-   /* 保存输入框里还没发送的草稿 */ case "draft":synchronized(MainActivity.this){state.put("draft",p.optString("text"));saveState();}break;/* 保存一个项目的全部文件 */ case "project":if(art.busy)throw new Exception("美术资源正在写入，请等待完成后编辑");if(cloud.busy())throw new Exception("同步中暂不修改项目");if(ProjectTrash.index(ProjectTrash.trash(state),p.getString("id"),true)>=0)throw new Exception("项目已删除，请先从最近删除恢复");if(link.running&&link.projectId.equals(p.optString("id")))throw new Exception("联动中暂不修改该项目，停止后可编辑");upsert("projects",p);event("saved",p.optString("id"));break;
+   /* 保存输入框里还没发送的草稿 */ case "draft":synchronized(MainActivity.this){state.put("draft",p.optString("text"));saveState();}break;/* 保存一个项目的全部文件 */ case "project":if(art.busy)throw new Exception("美术资源正在写入，请等待完成后编辑");if(cloud.busy())throw new Exception("同步中暂不修改项目");if(ProjectTrash.index(ProjectTrash.trash(state),p.getString("id"),true)>=0)throw new Exception("项目已删除，请先从最近删除恢复");if(link.running&&link.projectId.equals(p.optString("id")))throw new Exception("联动中暂不修改该项目，停止后可编辑");saveProjectFrom(p);event("saved",p.optString("id"));break;
    /* 保存一段 AI 对话 */ case "chat":upsert("chats",p);break;
    /* 弹出项目操作菜单（打开/接力/上传/删除） */ case "projectMenu":projectMenu(p.getString("id"));break;
    /* 把项目移到最近删除（可恢复） */ case "projectTrash":projectChange("trash",p.getString("id"));break;/* 从最近删除里恢复项目 */ case "projectRestore":projectChange("restore",p.getString("id"));break;/* 彻底删除项目（不可恢复） */ case "projectPurge":projectChange("purge",p.getString("id"));break;
@@ -923,7 +1362,20 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    // 在本地猜一个「100 条」的标准，只会让长对话突然中断，用户还不知道为什么。for(int i=0;i<messages.length();i++){JSONObject m=messages.getJSONObject(i);if(!Arrays.asList("user","assistant").contains(m.getString("role")))throw new Exception("不支持的消息角色");}
   if(params.optBoolean("createProject")){
    if(building||pendingHandoff!=null)throw new Exception("请先结束构建或交接任务");String text=messageText(messages.getJSONObject(messages.length()-1));
-   synchronized(this){JSONObject nextState=new JSONObject(state.toString());JSONObject created=ProjectCreation.create(nextState,params.getString("chatId"),text);JSONObject old=state;state=nextState;try{saveState();}catch(Exception e){state=old;throw e;}params.put("projectId",created.getString("id")).put("projectContext",true).put("editMode","auto");event("aiProjectCreated",new JSONObject().put("projectId",created.getString("id")).put("chatId",params.getString("chatId")));}
+   synchronized(this){
+      /*
+       * 建项目只会往 projects / chats 里加东西，不会改别人的内容。
+       * 所以回滚时把新加的那几条删掉就行 —— 不用备份整个 state。
+       */
+      int projectsBefore=state.getJSONArray("projects").length();
+      int chatsBefore=state.getJSONArray("chats").length();
+      JSONObject created=ProjectCreation.create(state,params.getString("chatId"),text);
+      try{saveState();}catch(Exception e){
+       JSONArray ps=state.getJSONArray("projects"),chs=state.getJSONArray("chats");
+       while(ps.length()>projectsBefore)ps.remove(ps.length()-1);
+       while(chs.length()>chatsBefore)chs.remove(chs.length()-1);
+       throw e;
+      }params.put("projectId",created.getString("id")).put("projectContext",true).put("editMode","auto");event("aiProjectCreated",new JSONObject().put("projectId",created.getString("id")).put("chatId",params.getString("chatId")));}
   }
   JSONObject editBase=null;String editMode=params.optString("editMode","");
   // 无条件诊断：先看这次请求的规模，再看有没有进项目上下文分支
@@ -1013,7 +1465,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   JSONObject toolProject;synchronized(MainActivity.this){toolProject=new JSONObject(byId("projects",projectId).toString());}
   if(baseline!=null)toolProject.put("files",new JSONObject(baseline.toString()));
   result=DevAgent.run(this,client,profile,key,request,system,toolProject,debug);
- }else result=DevAgent.run(this,client,profile,key,request,system,null,debug);}catch(Exception e){err=client.cancelled?(onDevice?"本地生成已取消":"已取消。服务端可能仍计费，本次用量未知。"):safeError(e);}try{JSONObject log=new JSONObject().put("id",rid).put("time",started).put("chatId",chat).put("projectId",projectId).put("provider",profile.optString("name")).put("source",Usage.source(profile)).put("profileId",profile.optString("id")).put("model",result==null?profile.optString("model"):result.optString("model")).put("elapsedMs",System.currentTimeMillis()-started).put("status",result==null?(client.cancelled?"cancelled":"error"):(result.optBoolean("incomplete")?"incomplete":"ok")).put("usage",result==null?new JSONObject().put("known",false):result.getJSONObject("usage"));synchronized(MainActivity.this){JSONObject beforeCommit=new JSONObject(state.toString());try{if(client.usageSegments.length()==0)state.getJSONArray("usage").put(log);else for(int si=0;si<client.usageSegments.length();si++){JSONObject segment=client.usageSegments.getJSONObject(si);state.getJSONArray("usage").put(new JSONObject(log.toString()).put("id",rid+"-"+si).put("usage",segment.getJSONObject("usage")).put("elapsedMs",segment.optLong("elapsedMs")).put("status",segment.optString("status")));}
+ }else result=DevAgent.run(this,client,profile,key,request,system,null,debug);}catch(Exception e){err=client.cancelled?(onDevice?"本地生成已取消":"已取消。服务端可能仍计费，本次用量未知。"):safeError(e);}try{JSONObject log=new JSONObject().put("id",rid).put("time",started).put("chatId",chat).put("projectId",projectId).put("provider",profile.optString("name")).put("source",Usage.source(profile)).put("profileId",profile.optString("id")).put("model",result==null?profile.optString("model"):result.optString("model")).put("elapsedMs",System.currentTimeMillis()-started).put("status",result==null?(client.cancelled?"cancelled":"error"):(result.optBoolean("incomplete")?"incomplete":"ok")).put("usage",result==null?new JSONObject().put("known",false):result.getJSONObject("usage"));synchronized(MainActivity.this){
+    /*
+     * usage 日志只会往数组尾部追加，回滚时把这几条撤掉就行。
+     * 备份整个 state 会一次吃掉上百 MB（项目文件全文）—— 手机上必然 OOM。
+     */
+    int usageBefore=state.getJSONArray("usage").length();
+    try{if(client.usageSegments.length()==0)state.getJSONArray("usage").put(log);else for(int si=0;si<client.usageSegments.length();si++){JSONObject segment=client.usageSegments.getJSONObject(si);state.getJSONArray("usage").put(new JSONObject(log.toString()).put("id",rid+"-"+si).put("usage",segment.getJSONObject("usage")).put("elapsedMs",segment.optLong("elapsedMs")).put("status",segment.optString("status")));}
    if(result!=null&&research!=null){JSONObject brief=new JSONObject(research.toString());JSONArray rs=brief.getJSONArray("references");for(int ri=0;ri<rs.length();ri++){rs.getJSONObject(ri).remove("code");rs.getJSONObject(ri).remove("licenseText");}result.put("research",brief);}
    if(result!=null&&baseline!=null&&!editMode.isEmpty()){
     JSONObject edit=new JSONObject().put("projectId",projectId).put("mode",editMode).put("status","rejected");
@@ -1023,11 +1481,52 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      edit.put("files",changes).put("base",baseline).put("message",editMode.equals("auto")?"已保存到指定项目；可预览或构建 APK":"建议已生成，等待审查应用");
     }catch(Exception ex){edit.put("message",safeError(ex));}
     result.put("edit",edit);
-   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",result.optJSONObject("edit")).put("toolCalls",result.optJSONArray("toolCalls")).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",result.optString("text")).put("editBase",baseline).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){state=beforeCommit;throw commitError;}}
+   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",editSummary(result.optJSONObject("edit"))).put("toolCalls",toolCallSummary(result.optJSONArray("toolCalls"))).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",result.optString("text")).put("editBaseHash",baseline==null?"":Integer.toHexString(baseline.toString().hashCode())).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){
+    // 回滚：撤掉刚追加的 usage 条目（只多不多）
+    try{JSONArray u=state.getJSONArray("usage");while(u.length()>usageBefore)u.remove(u.length()-1);}catch(Exception ignored){}
+    throw commitError;
+   }}
    if(result!=null){result.put("chatId",chat).put("requestId",rid);event("reply",result);}else event("error",err);
   }catch(Exception e){event("error","结果记录失败，请导出当前对话保留内容");}finally{liveEdit=null;event("aiLive",new JSONObject());active=null;event("busy",false);sendState();JSONObject completed=result;String failure=err;runOnUiThread(()->{if(link!=null)link.aiFinished(chat,completed,failure);try{if(completed!=null&&completed.optJSONObject("edit")!=null&&completed.getJSONObject("edit").optString("status").equals("applied")){JSONArray calls=completed.optJSONArray("toolCalls");boolean image=false;if(calls!=null)for(int i=0;i<calls.length();i++)if(calls.getJSONObject(i).optString("name").equals("generate_image")&&calls.getJSONObject(i).has("result"))image=true;if(image){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(this,byId("projects",projectId));localRunner.start();}}}catch(Exception ignored){event("artStatus","图片和代码已保存；可在项目中打开本地预览");}});}});
  }
 
+
+ /*
+  * 保存前端送来的项目改动。
+  *
+  * <p>前端送来的 {@code files} 现在是「路径 → 内容」与「路径 → 字节数」混合的：
+  * 只有**本轮真正编辑过**的文件带内容，其余只是清单里的数字。
+  * 直接 upsert 会把数字当文件内容存进去 —— 下次打开文件全是乱码。
+  *
+  * <p>所以这里做三件事：
+  * <ol>
+  * <li>取出本机这个项目现有的完整文件表；</li>
+  * <li>把前端送来的<b>字符串</b>值覆盖进去（数字是清单标记，忽略）；</li>
+  * <li>其余字段（名称、快照、构建记录等）以本机的为准 —— 前端那份是瘦身后的，没有这些。</li>
+  * </ol>
+  *
+  * <p>新增文件由前端送字符串进来，所以这里不用另外判断。
+  */
+ void saveProjectFrom(JSONObject incoming)throws Exception{
+  String id=incoming.getString("id");
+  JSONObject current=byId("projects",id);
+  JSONObject merged=new JSONObject(current.toString());
+  JSONObject src=incoming.optJSONObject("files");
+  if(src!=null){
+   JSONObject dst=merged.optJSONObject("files");
+   if(dst==null){dst=new JSONObject();merged.put("files",dst);}
+   for(java.util.Iterator<String> it=src.keys();it.hasNext();){
+    String n=it.next();
+    Object v=src.opt(n);
+    // 只有字符串才是真内容；数字是「字节数」清单标记
+    if(v instanceof String)dst.put(n,(String)v);
+   }
+  }
+  if(incoming.has("name"))merged.put("name",incoming.optString("name"));
+  merged.put("updated",System.currentTimeMillis());
+  replaceProject(merged);
+  saveState();
+ }
 
  /** 用新内容整条替换项目列表里的对应记录（不存盘，由调用方负责）。 */
  void replaceProject(JSONObject p)throws Exception{JSONArray ps=state.getJSONArray("projects");for(int i=0;i<ps.length();i++)if(ps.getJSONObject(i).getString("id").equals(p.getString("id"))){ps.put(i,p);return;}throw new Exception("目标项目不存在");}
@@ -1040,7 +1539,16 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   */
  void applyProjectFiles(JSONObject q)throws Exception{
   if(cloud.busy()||active!=null||building||IntegrationActivity.busy||link.running)throw new Exception("请等待当前任务结束后再应用文件");
-  synchronized(this){JSONObject before=new JSONObject(state.toString());JSONObject p=byId("projects",q.getString("id"));JSONObject changed=ProjectEdits.apply(p,q.getJSONObject("base"),q.getJSONObject("files"),q.optString("source","文件审查"));try{replaceProject(changed);saveState();}catch(Exception e){state=before;throw e;}}
+  synchronized(this){
+      /*
+       * 只备份要改的那一个项目，回滚时换回去。
+       * 备份整个 state 会一次吃掉上百 MB（项目文件全文）——
+       * 一个项目动辄几 MB，整个 state 几十 MB，手机上必然 OOM。
+       */
+      JSONObject p=byId("projects",q.getString("id"));
+      JSONObject before=new JSONObject(p.toString());
+      JSONObject changed=ProjectEdits.apply(p,q.getJSONObject("base"),q.getJSONObject("files"),q.optString("source","文件审查"));
+      try{replaceProject(changed);saveState();}catch(Exception e){replaceProject(before);throw e;}}
   sendState();event("filesApplied",q.getString("id"));
  }
  /**
@@ -1056,7 +1564,48 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    if(projectChangeBusy())throw new Exception("请先结束当前任务");if(!ProjectEdits.same(current.getJSONObject("files"),q.getJSONObject("base")))throw new Exception("文件已变化，请重新打开快照");JSONArray snaps=current.optJSONArray("snapshots");if(snaps==null||snaps.length()==0)throw new Exception("没有快照");JSONObject last=snaps.getJSONObject(snaps.length()-1),changed=new JSONObject(current.toString());CloudFiles.snapshot(changed);changed.put("files",new JSONObject(last.getJSONObject("files").toString()));if(last.has("binaryFiles"))changed.put("binaryFiles",new JSONObject(last.getJSONObject("binaryFiles").toString()));CloudFiles.entries(changed);JSONObject before=new JSONObject(state.toString());try{replaceProject(changed);saveState();}catch(Exception e){state=before;throw e;}sendState();event("filesApplied",q.getString("id"));return;
   }
 
-  JSONObject p=byId("projects",q.getString("id"));JSONArray snapshots=p.optJSONArray("snapshots");if(snapshots==null||snapshots.length()==0)throw new Exception("没有可恢复快照");JSONObject files=new JSONObject(snapshots.getJSONObject(snapshots.length()-1).getJSONObject("files").toString());Iterator<String> it=p.getJSONObject("files").keys();while(it.hasNext()){String n=it.next();if(!files.has(n))files.put(n,JSONObject.NULL);}q.put("files",files).put("source","恢复快照");applyProjectFiles(q);
+  /*
+    * 恢复到上一份存档。
+    *
+    * <p>存档分两种：
+    * <ul>
+    * <li>全量（老数据）—— 里面就是当时的全部文件，没列出的当前文件等于那时不存在，要删掉；</li>
+    * <li>差量（新数据）—— 里面只有那次改动过的文件的<b>旧内容</b>，
+    *     恢复 = 把当前内容换回旧内容，没动过的文件原样保留。</li>
+    * </ul>
+    *
+    * <p>两种都支持，老项目升级后照样能恢复。
+    */
+   JSONObject p=byId("projects",q.getString("id"));JSONArray snapshots=p.optJSONArray("snapshots");if(snapshots==null||snapshots.length()==0)throw new Exception("没有可恢复存档");
+   JSONObject last=snapshots.getJSONObject(snapshots.length()-1);
+   JSONObject snapFiles=last.optJSONObject("files");
+   if(snapFiles==null)throw new Exception("存档内容为空");
+   JSONObject files;
+   if(last.optBoolean("delta",false)){
+    /*
+     * 差量：把改动过的文件换回旧内容，其余原样保留。
+     *
+     * <p>三件事：
+     * <ol>
+     * <li>差量里存着旧值的文件 → 换回旧值；值为 NULL 的表示当时不存在 → 删掉；</li>
+     * <li>{@code added} 名单里的文件是那之后新增的 → 恢复时删掉；</li>
+     * <li>其余文件没动过 → 原样保留。</li>
+     * </ol>
+     */
+    files=new JSONObject(p.getJSONObject("files").toString());
+    for(java.util.Iterator<String> it=snapFiles.keys();it.hasNext();){
+     String n=it.next();
+     if(snapFiles.isNull(n))files.remove(n);
+     else files.put(n,snapFiles.optString(n,""));
+    }
+    JSONArray added=last.optJSONArray("added");
+    if(added!=null)for(int ai=0;ai<added.length();ai++)files.remove(added.getString(ai));
+   }else{
+    /* 全量：存档里没有的文件在当时不存在，要删掉 */
+    files=new JSONObject(snapFiles.toString());
+    Iterator<String> it=p.getJSONObject("files").keys();while(it.hasNext()){String n=it.next();if(!files.has(n))files.put(n,JSONObject.NULL);}
+   }
+   q.put("files",files).put("source","恢复存档");applyProjectFiles(q);
  }
  /** 打开项目关联的官方 Studio 页面。链接必须是 studio.stepx.com 下的具体项目页。 */
  void openStudioProject(String id)throws Exception{JSONObject p=byId("projects",id);String url=p.optString("studioUrl",HOME);if(url.isEmpty())url=HOME;if(!isStudio(Uri.parse(url))||!"studio.stepx.com".equals(Uri.parse(url).getHost()))throw new Exception("请关联官方 Studio 项目链接");show("studio");if(!url.equals(studio.getUrl()))studio.loadUrl(url);}
@@ -1150,11 +1699,24 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   * @param p 项目对象
   */
  void exportProject(final JSONObject p){
-  final String name=p.optString("name","project").replaceAll("[^\\p{L}\\p{N}._-]","_")+".zip";
+  /*
+   * 导出的是**本机保存的真实文件**，不是前端送来的那份。
+   *
+   * <p>前端送来的项目是「瘦」过的：files 里只有路径和字节数，没有内容。
+   * 直接拿它打包会导出一堆写着数字的文件 —— 用户拿到的是坏包。
+   */
+  JSONObject real;
+  try{
+   real=byId("projects",p.getString("id"));
+  }catch(Exception e){
+   toast("导出失败："+safeError(e));
+   return;
+  }
+  final String name=real.optString("name","project").replaceAll("[^\\p{L}\\p{N}._-]","_")+".zip";
   toast("正在打包，稍后选择保存位置…");
   worker.execute(()->{
    try{
-    final File out=buildProjectZip(p);
+    final File out=buildProjectZip(real);
     runOnUiThread(()->{
      exportFile=out;
      exportBytes=null;

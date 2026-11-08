@@ -73,12 +73,44 @@ final class ProjectDiff {
 
         int idx = snapIndex < 0 ? snaps.length() - 1 : Math.max(0, Math.min(snapIndex, snaps.length() - 1));
         JSONObject snap = snaps.getJSONObject(idx);
-        JSONObject oldFiles = snap.optJSONObject("files");
-        if (oldFiles == null) oldFiles = new JSONObject();
+        JSONObject snapFiles = snap.optJSONObject("files");
+        if (snapFiles == null) snapFiles = new JSONObject();
 
         // 当前文本文件：直接从 p.files 取内容算哈希。
         JSONObject nowFiles = p.optJSONObject("files");
         if (nowFiles == null) nowFiles = new JSONObject();
+
+        /*
+         * 存档有两种形态：
+         * · 全量 —— 里面就是当时的全部文件；
+         * · 差量 —— 里面只有那次改动过的文件的旧内容。
+         *
+         * 差量要先「叠回」当前文件表，才得到改动前的完整样子：
+         * 叠回去 = 用存档里的旧内容覆盖同名文件，其余保持当前值。
+         */
+        JSONObject oldFiles;
+        if (snap.optBoolean("delta", false)) {
+            /*
+             * 差量：叠回当前文件表，得到「改动前」的样子。
+             *
+             * <p>值为 NULL 的条目表示「存档时刻这个文件还不存在」——
+             * 叠回时应当**不存在**，而不是空字符串。
+             * 用空字符串会把它算成「内容变了」，实际应该是「新增了」。
+             */
+            oldFiles = new JSONObject(nowFiles.toString());
+            for (Iterator<String> it = snapFiles.keys(); it.hasNext(); ) {
+                String n = it.next();
+                if (snapFiles.isNull(n)) oldFiles.remove(n);
+                else oldFiles.put(n, snapFiles.optString(n, ""));
+            }
+            // added 名单：存档时刻之后新建的文件，同样算「改动前不存在」
+            JSONArray added = snap.optJSONArray("added");
+            if (added != null) {
+                for (int i = 0; i < added.length(); i++) oldFiles.remove(added.getString(i));
+            }
+        } else {
+            oldFiles = snapFiles;
+        }
 
         JSONArray added = new JSONArray(), removed = new JSONArray(), changed = new JSONArray();
         int same = 0;

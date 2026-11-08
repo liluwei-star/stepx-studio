@@ -303,5 +303,76 @@ final class CloudFiles {
   }else (e.getString("encoding").equals("utf8")?f:b).put(n,e.getString("content"));
  }
  p.put("files",f).put("binaryFiles",b).put("bigHashes",h);}
- static void snapshot(JSONObject p)throws Exception{JSONArray old=p.optJSONArray("snapshots"),out=new JSONArray();if(old!=null)for(int i=Math.max(0,old.length()-1);i<old.length();i++)out.put(old.get(i));out.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",new JSONObject(p.getJSONObject("files").toString())).put("binaryFiles",p.optJSONObject("binaryFiles")==null?new JSONObject():new JSONObject(p.getJSONObject("binaryFiles").toString())));p.put("snapshots",out);}
+ /*
+ * 把项目里的 base64 二进制搬到磁盘，改成 .bin 引用。
+ *
+ * <p>为什么：这些内容原来直接存在 workspace.json 里。
+ * 一张图片 base64 后比原文件还大 33%，几十张图就能让 workspace.json 涨好几 MB ——
+ * 而 workspace.json 是**每次启动都要整个读进内存**的。
+ *
+ * <p>机制本来就有（超过 BIG_THRESHOLD 的文件写成 .bin 放 project-files/），
+ * 但只有走同步的路径才会触发。本方法让**已有的**项目也能用上。
+ *
+ * <p>搬完 workspace.json 里只剩文件名（几十字节），内存和磁盘都省。
+ *
+ * @param p        项目对象（会被就地修改）
+ * @param filesDir 应用私有目录
+ * @return 搬走了多少字节
+ */
+ static long externalizeBinaries(JSONObject p,File filesDir)throws Exception{
+  JSONObject bins=p.optJSONObject("binaryFiles");
+  if(bins==null)return 0L;
+  JSONObject hashes=p.optJSONObject("bigHashes");
+  if(hashes==null){hashes=new JSONObject();p.put("bigHashes",hashes);}
+  long moved=0L;
+  for(java.util.Iterator<String> it=bins.keys();it.hasNext();){
+   String n=it.next();
+   String v=bins.optString(n,"");
+   if(v.isEmpty()||v.endsWith(".bin"))continue;
+   byte[] raw;
+   try{raw=Base64.decode(v,Base64.DEFAULT);}catch(Exception e){continue;}
+   String name=bigName(n);
+   File bigFile=new File(bigDir(filesDir),name);
+   if(!bigFile.isFile()){
+    try(java.io.FileOutputStream out=new java.io.FileOutputStream(bigFile)){out.write(raw);}
+   }
+   bins.put(n,name);
+   hashes.put(n,hash(raw));
+   moved+=raw.length;
+  }
+  return moved;
+ }
+
+ /*
+ * 存一份恢复存档。
+ *
+ * <p>只存**这次同步真正动过的文件**的旧内容，不存整个项目。
+ * 原来存全量，一个 300 文件的项目每次同步都多存一份全量，
+ * workspace.json 很快涨到几 MB。
+ *
+ * <p>只留 2 份：再多用户也用不上，每份都是内存和磁盘负担。
+ *
+ * @param p      项目对象（会被就地修改）
+ * @param changed 这次变了的文件路径；传 null 表示「全量存一份」
+ */
+static void snapshot(JSONObject p)throws Exception{snapshot(p,null);}
+static void snapshot(JSONObject p,java.util.Set<String> changed)throws Exception{
+ JSONArray old=p.optJSONArray("snapshots"),out=new JSONArray();
+ if(old!=null)for(int i=Math.max(0,old.length()-1);i<old.length();i++)out.put(old.get(i));
+ JSONObject cur=p.optJSONObject("files"),delta=new JSONObject();
+ if(changed==null){
+  if(cur!=null)for(java.util.Iterator<String> it=cur.keys();it.hasNext();){String n=it.next();delta.put(n,cur.optString(n,""));}
+ }else{
+  /*
+   * 差量：changed 里「当前没有」的文件是这次同步新建的，
+   * 用 NULL 标记 —— 恢复时要删掉，否则新建的文件会残留下来。
+   */
+  for(String n:changed){
+   if(cur!=null&&cur.has(n))delta.put(n,cur.optString(n,""));
+   else delta.put(n,JSONObject.NULL);
+  }
+ }
+ out.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("delta",true));
+ p.put("snapshots",out);
+}
 }

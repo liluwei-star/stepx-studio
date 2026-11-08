@@ -88,6 +88,59 @@
 const $=s=>document.querySelector(s),app=$('#app'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uuid=()=>crypto.randomUUID(),send=(a,p={})=>Neo.action(a,JSON.stringify(p)),num=n=>Number(n||0).toLocaleString('zh-CN');
 let S=JSON.parse(Neo.read()),page='projects',projectId=null,file='index.html',chatId=null,profileId=null,busy=false,pendingChat=null,requestMessages=null,usageScope='all',editProfile=null;
+
+/* 编辑中的文件内容暂存。状态快照只带文件清单不带内容，所以内容放这儿。 */
+let editBuffer={};
+
+/*
+ * 取项目的文本文件内容。
+ *
+ * 为什么不能直接用 p.files[n]：
+ * 状态快照为了不撑爆内存，只带**文件清单**（路径 → 字节数），
+ * 不带内容 —— 一个用了几天的工作台有 36 MB，全塞进快照会直接 OOM。
+ * 所以内容按需取：打开一个文件取一个。
+ *
+ * @param p    项目对象（必须有 id）
+ * @param path 项目内相对路径
+ * @return 文件内容；取不到返回空串
+ */
+function fileContent(p,path){
+  if(!p||!p.id||!path)return '';
+  try{return Neo.readFile(p.id,path)||''}catch(e){return ''}
+}
+
+/*
+ * 取一份恢复快照里的文件内容。
+ *
+ * 快照列表只带「有哪些文件、什么时候」，完整内容在原生那边，
+ * 用 Neo.readSnapshot(projectId, index) 按序号取。
+ */
+function snapshotFiles(p,index){
+  if(!p||!p.id)return {};
+  try{return JSON.parse(Neo.readSnapshot(p.id,index))||{}}catch(e){return {}}
+}
+
+/*
+ * 取文件的当前内容。
+ *
+ * 编辑器里改过的内容优先 —— 它还没存进原生，但已经是用户看到的样子。
+ */
+function currentContent(p,path){
+  if(editBuffer[path]!==undefined)return editBuffer[path];
+  return fileContent(p,path);
+}
+
+/*
+ * 把项目的所有文本文件内容读出来（只在确实需要全部内容时用）。
+ *
+ * 比如：全局替换、预览编译。都用这个，避免到处写循环。
+ */
+function allFileContents(p){
+  const out={};
+  const names=Object.keys((p&&p.files)||{});
+  for(const n of names)out[n]=fileContent(p,n);
+  return out;
+}
 let pendingImages=[],detectedModels=[],draft=S.draft||'',includeCode=false,undo=[],redo=[],noticeTimer;aiLive=S.activeAi||{};
 const defaults=()=>{for(const k of ['projects','profiles','chats','usage','projectTrash'])if(!Array.isArray(S[k]))S[k]=[]};defaults();
 const project=()=>S.projects.find(x=>x.id===projectId),chat=()=>S.chats.find(x=>x.id===chatId),selectedProfile=()=>S.profiles.find(x=>x.id===profileId)||S.profiles[0];
@@ -96,10 +149,22 @@ function saveProject(){
   const p=project();
   if(!p)return;
   p.updated=Date.now();
+  /*
+   * 把暂存区的编辑内容合并进要发出去的文件表。
+   *
+   * 状态快照里 p.files 是「路径 → 字节数」的清单（不带内容），
+   * 所以编辑中的内容放在 editBuffer，这里统一合并后再发给原生。
+   * 原生那边有完整文件表，会用收到的新内容覆盖对应文件。
+   */
+  const payload=Object.assign({},p);
+  payload.files=Object.assign({},p.files);
+  for(const n in editBuffer){
+    if(editBuffer[n]!==undefined)payload.files[n]=editBuffer[n];
+  }
   // 保存失败不能静默，也不能拦住后面的动作 ——
   // 之前构建按钮点了没反应，就是这里抛异常把 send('buildApk') 掐断了。
   try{
-    send('project',p);
+    send('project',payload);
     if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';
   }catch(e){
     notice('保存失败：'+(e&&e.message||e));
@@ -147,7 +212,7 @@ window.receive=(type,data)=>{
    if(type==='memorySkills'){try{window.memoryState=JSON.parse(data);}catch(e){window.memoryState={};}if(page==='memory')render();return;}
   // 原生让前端打开某个文件（文件浏览器的「打开编辑」走这条路）
   if(type==='assetAudit'){window.auditReport=data;page='audit';render();return;}if(type==='openFile'){file=String(data);undo=[];redo=[];page='editor';render();return;}
-  if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;file='index.html';undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=JSON.parse(JSON.stringify(project().files));candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId&&page==='editor'){undo=[];redo=[];if(!project()?.files[file])file='index.html';render();notice('AI 已更新当前项目文件');}else renderIfAi();}};
+  if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;file='index.html';undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=allFileContents(project());candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId&&page==='editor'){undo=[];redo=[];if(!project()||!(file in project().files))file='index.html';render();notice('AI 已更新当前项目文件');}else renderIfAi();}};
 function renderIfAi(){if(page==='ai'||page==='collab'||page==='usage')render()}
 window.backLocal=()=>{if(closeChatHistory())return true;if(page==='collab'||page==='review'||page==='builds'){page='editor';render();return true}if(page==='editor'){page='projects';render();return true}if(page==='trash'){page='projects';render();return true}if(page==='settings'||page==='help'||page==='localModels'||page==='connectors'){page=page==='settings'&&S.aiAssistantEnabled!==false?'ai':'projects';render();return true}return false};
 window.navigate=p=>{closeChatHistory();if(p==='projects'&&page==='editor')return;page=p;render()};
@@ -201,19 +266,49 @@ function computeDiff(p, snapIndex){
 
   const idx=(snapIndex==null||snapIndex<0)?snaps.length-1:Math.min(snapIndex,snaps.length-1);
   const snap=snaps[idx]||{};
-  const oldFiles=snap.files||{};
+  /*
+   * 快照的完整内容要从原生按需取（快照列表里只留了文件名）。
+   * 当前文件内容也从原生取（状态快照是清单，不带内容）。
+   */
+  /*
+   * 存档有两种形态：全量（当时的全部文件）和差量（只记改动过的文件的旧内容）。
+   * 差量要先叠回当前文件表，才得到改动前的完整样子。
+   */
+  const snapFiles=snapshotFiles(p,idx);
   const nowFiles=p.files||{};
-
+  const isDelta=!!(p.snapshots||[])[idx]&&!!(p.snapshots||[])[idx].delta;
+  /*
+   * 差量存档只记了「改动过的文件的旧内容」，
+   * 所以只有这些文件需要读内容比较；其余文件必然没变。
+   * 全量存档则每个文件都要比。
+   */
   const added=[],changed=[],removed=[],addedBinary=[];
   let same=0;
 
-  for(const n of Object.keys(nowFiles)){
-    if(!(n in oldFiles)){added.push(n);continue}
-    if(oldFiles[n]===nowFiles[n])same++;
-    else changed.push(n);
-  }
-  for(const n of Object.keys(oldFiles)){
-    if(!(n in nowFiles))removed.push(n);
+  if(isDelta){
+    /*
+     * 差量：值是 null 的表示「存档时刻这个文件还不存在」→ 现在有就是新增。
+     * added 名单里的同理（存档时刻之后新建的）。
+     */
+    const addedLater=(p.snapshots||[])[idx].added||[];
+    for(const n of Object.keys(nowFiles)){
+      if(!(n in snapFiles)){added.push(n);continue}
+      if(snapFiles[n]===null||addedLater.includes(n)){added.push(n);continue}
+      if(snapFiles[n]===currentContent(p,n))same++;
+      else changed.push(n);
+    }
+    for(const n of Object.keys(snapFiles)){
+      if(!(n in nowFiles)&&snapFiles[n]!==null)removed.push(n);
+    }
+  }else{
+    for(const n of Object.keys(nowFiles)){
+      if(!(n in snapFiles)){added.push(n);continue}
+      if(snapFiles[n]===currentContent(p,n))same++;
+      else changed.push(n);
+    }
+    for(const n of Object.keys(snapFiles)){
+      if(!(n in nowFiles))removed.push(n);
+    }
   }
   // 二进制文件不在 files 里，单独提一下 —— 同步/导入进来的图片、模型
   // 也算「这次变了什么」的一部分
@@ -483,9 +578,9 @@ function comparePage(){
   const p=project();
   if(!p){page='projects';render();return}
   const snaps=p.snapshots||[];
-  const snap=snaps.length?snaps[snaps.length-1]:{};
-  const oldText=(snap.files||{})[diffPath];
-  const newText=(p.files||{})[diffPath];
+  const idx=snaps.length?snaps.length-1:0;
+  const oldText=(snapshotFiles(p,idx)||{})[diffPath];
+  const newText=currentContent(p,diffPath);
 
   // 缓存一下，切换「只看改动」时不用重算
   if(!diffResult||diffResult.path!==diffPath||diffResult.version!==(p.updated||0)){
@@ -597,7 +692,8 @@ function overviewPage(){
   const nText=Object.keys(files).length;
   const nBin=Object.keys(bins).length;
   let textBytes=0;
-  for(const n of Object.keys(files))textBytes+=(files[n]||'').length;
+  // files 里的值是字节数（快照是瘦身后的清单，不带内容）
+  for(const n of Object.keys(files))textBytes+=(Number(files[n])||0);
   let binBytes=0,nBig=0;
   for(const n of Object.keys(bins)){
     binBytes+=Math.max(0,sizes[n]==null?0:sizes[n]);
@@ -686,7 +782,7 @@ function replacePage(){
   let totalHits=0;
   if(rpFind){
     for(const n of Object.keys(files).sort()){
-      const c=countOcc(files[n]||'',rpFind,rpCase);
+      const c=countOcc(fileContent(p,n),rpFind,rpCase);
       if(c>0){hits.push({path:n,n:c});totalHits+=c}
     }
   }
@@ -759,7 +855,7 @@ function applyCodeFont(){
  */
 function allFiles(p){
   const out=[];
-  for(const n of Object.keys(p.files||{}))out.push({path:n,kind:'text',size:(p.files[n]||'').length});
+  for(const n of Object.keys(p.files||{}))out.push({path:n,kind:'text',size:Number(p.files[n])||0});
   const bins=p.binaryFiles||{},sizes=p.binarySizes||{};
   for(const n of Object.keys(bins)){
     const ref=bins[n]||'';
@@ -788,8 +884,8 @@ function searchFiles(p,q){
   const hits=new Map();
   if(!q)return hits;
   for(const n of Object.keys(p.files||{})){
-    const v=p.files[n]||'';
     if(n.toLowerCase().includes(q)){hits.set(n,[]);continue}
+    const v=fileContent(p,n);
     const idx=v.toLowerCase().indexOf(q);
     if(idx>=0)hits.set(n,[v.slice(0,idx).split('\n').length]);
   }
@@ -974,8 +1070,8 @@ function buildFileMeta(p,q,hits){
     (q?` · 匹配 ${hits.size} 个`:'');
 }
 
-function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor${codeFocus?' code-focus':''}" id="editorRoot"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files"><button class="chosen" data-a="file" data-id="${esc(file)}">${esc(file)}</button><button data-a="filesPage">📁 全部 ${allFiles(p).length} 个</button><button data-a="changesPage">变更</button><button data-a="overviewPage">总览</button><button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="codeFocus">${codeFocus?'⛶ 退出全屏':'⛶ 全屏'}</button><button data-a="fontMinus">A−</button><button data-a="fontPlus">A+</button><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="gotoLine">跳行</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||'').length} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});$('#code').value=p.files[file]||'';
-  applyCodeFont();$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(p.files[file]);if(undo.length>80)undo.shift();redo=[];p.files[file]=$('#code').value;saveProject()});$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
+function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor${codeFocus?' code-focus':''}" id="editorRoot"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files"><button class="chosen" data-a="file" data-id="${esc(file)}">${esc(file)}</button><button data-a="filesPage">📁 全部 ${allFiles(p).length} 个</button><button data-a="changesPage">变更</button><button data-a="overviewPage">总览</button><button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="codeFocus">${codeFocus?'⛶ 退出全屏':'⛶ 全屏'}</button><button data-a="fontMinus">A−</button><button data-a="fontPlus">A+</button><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="gotoLine">跳行</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||0)} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});$('#code').value=fileContent(p,file);
+  applyCodeFont();$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(editBuffer[file]!==undefined?editBuffer[file]:fileContent(p,file));if(undo.length>80)undo.shift();redo=[];editBuffer[file]=$('#code').value;saveProject()});$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
 /**
  * 跳到代码的第 n 行。
  *
@@ -1002,11 +1098,11 @@ function gotoLine(n){
 }
 
 function insert(t){const e=$('#code');if(!e)return;const pos=e.selectionStart;e.setRangeText(t,pos,e.selectionEnd,'end');e.dispatchEvent(new Event('input'));e.focus()}
-function compiled(p){let html=p.files['index.html']||'';const doc=new DOMParser().parseFromString(html,'text/html');for(const el of [...doc.querySelectorAll('link[rel="stylesheet"][href]')]){let n=el.getAttribute('href').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('style');s.textContent=p.files[n];el.replaceWith(s)}}for(const el of [...doc.querySelectorAll('script[src]')]){let n=el.getAttribute('src').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('script');s.textContent=p.files[n].replace(/<\/script/gi,'<\\/script');el.replaceWith(s)}}return '<!doctype html>\n'+doc.documentElement.outerHTML}
+function compiled(p){let html=fileContent(p,'index.html');const doc=new DOMParser().parseFromString(html,'text/html');for(const el of [...doc.querySelectorAll('link[rel="stylesheet"][href]')]){let n=el.getAttribute('href').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('style');s.textContent=fileContent(p,n);el.replaceWith(s)}}for(const el of [...doc.querySelectorAll('script[src]')]){let n=el.getAttribute('src').replace(/^\.\//,'');if(p.files[n]!=null){let s=doc.createElement('script');s.textContent=fileContent(p,n).replace(/<\/script/gi,'<\\/script');el.replaceWith(s)}}return '<!doctype html>\n'+doc.documentElement.outerHTML}
 let aiEditMode='auto',githubResearch=true,aiSetupOpen=false;
 function aiProjectCard(){return `<div class="card ai-target"><div class="ai-target-fields"><div><label for="aiProject">目标项目</label><select id="aiProject" ${busy?'disabled':''}><option value="">仅对话 · 不写入</option>${S.projects.map(x=>`<option value="${esc(x.id)}" ${x.id===projectId?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>${project()?`<div><label for="aiEditMode">工作方式</label><select id="aiEditMode" ${busy?'disabled':''}><option value="auto">直接修改 · 留快照</option><option value="review">先审查修改</option><option value="discuss">只讨论项目</option></select></div>`:''}</div>${project()?`<label class="setting-switch"><input id="githubResearch" type="checkbox" ${githubResearch?'checked':''}>开发前检索 GitHub 参考</label><small>先查可复用实现、核对许可证，再编写代码；关闭后可完全离线开发。</small>${artControls()}<details><summary>开发工具与写入说明</summary><small>AI 可列出/读取文件、搜索代码、暂存修改、本机编译检查、预览、离线构建 APK、读取调试日志。每轮最多6次工具循环，过程和结果可查看。</small><small>每轮读取全部最新文件和调试报告。仅写入选定项目；冲突或截断不会覆盖，保留最近 5 次快照。</small><div class="row"><button data-a="backEditor">文件</button><button data-a="preview">预览</button><button data-a="builds">构建 APK</button>${project().snapshots?.length?'<button data-a="restoreSnapshot">恢复文件</button>':''}</div></details>`:'<small>直接说“新建一个待办项目”，助手会创建本地项目并写入代码。也可以选择已有项目继续开发。</small>'}</div>`;}
 
-function ai(){if(!chatId&&S.chats.length)chatId=S.chats.filter(x=>(x.projectId||null)===projectId).slice(-1)[0]?.id||null;const c=chat(),p=selectedProfile();if(p)profileId=p.id;const messages=c?c.messages:[];let usageRows=S.usage.filter(r=>r.chatId===chatId),known=usageRows.filter(r=>r.usage.known),sum=usageTotals(usageRows.filter(r=>usageSource(r)==='external_api')).total,stepSum=usageTotals(usageRows.filter(r=>usageSource(r)==='step_api')).total;app.innerHTML=`<div class="page ai-page">${header('YOUR MODELS','AI 编程助手','使用自己的 API，在本机保存对话。')}<details class="ai-setup"${aiSetupOpen?' open':''}><summary>模型与项目设置</summary><div class="row"><select id="profileSelect" class="grow" aria-label="模型配置">${S.profiles.map(x=>`<option value="${esc(x.id)}" ${x.id===profileId?'selected':''}>${esc(x.name)} · ${esc(x.model)}</option>`).join('')||'<option value="">尚未配置模型</option>'}<option value="__new__">＋ 新建模型配置…</option></select><button data-a="settings">API</button><button data-a="localModels">本地模型</button><button data-connect="catalog">连接器</button><button data-a="integrations">联网/GitHub</button><button data-a="memoryPage">记忆</button></div><div class="row" style="margin-top:10px"><button class="grow history-trigger" data-a="chatHistory" aria-haspopup="dialog" aria-controls="chatHistoryDrawer"><span>☰ 对话历史</span><span class="history-current">${esc(c?.name||'新对话')}</span></button><button data-a="newChat">＋</button><button data-a="exportChat">导出</button>${c?'<button class="danger" data-a="deleteChat">删除</button>':''}</div><small>当前对话：第三方 ${num(sum)} / 阶跃 API ${num(stepSum)} / 本地 ${num(usageTotals(usageRows.filter(r=>usageSource(r)==='local_model')).total)} token${usageRows.some(r=>!r.usage.known)?' ＋ 未知用量':''} · 仅统计本工作台</small>${p?`<div class="status">${p.protocol==='local'?'端侧离线 · '+esc(p.name):'发送至 '+esc(p.endpoint)+(p.hasKey?'':' · 尚未保存密钥')}</div>`:'<div class="noticebar">先添加模型配置。支持 Chat Completions 兼容接口和 Anthropic Messages。</div>'}${aiProjectCard()}${liveEditCard()}</details><div id="messages">${messages.map((m,i)=>`<div class="message ${m.role}"><small>${m.role==='user'?'你':'AI'}</small><div>${(m.images||[]).map(u=>`<img class="msg-img" src="${u}" alt="用户附上的图片" loading="lazy">`).join('')}${!m.images&&m.imageCount?`<small class="muted">（这条消息原本附了 ${m.imageCount} 张图，图片不会存进对话记录，重开对话后不再显示）</small>`:''}${m.edit?`<details><summary>查看 AI 返回的代码与说明</summary><pre>${esc(typeof m.content==='string'?m.content:JSON.stringify(m.content))}</pre></details>`:`<pre>${esc(typeof m.content==='string'?m.content:JSON.stringify(m.content))}</pre>`}</div>${m.edit?`<div class="noticebar">${esc(m.edit.message)}${m.edit.status==='review'?`<button data-a="reviewAiFiles" data-id="${i}">审查并应用</button>`:''}</div>`:''}${m.research?`<details><summary>GitHub 参考 · ${m.research.status==='failed'?'检索未成功':m.research.references.length+' 个候选'}</summary><pre>${esc(JSON.stringify(m.research,null,2))}</pre></details>`:''}${m.benchmark?.decodeTokensPerSecond?`<small>本机生成 ${Number(m.benchmark.decodeTokensPerSecond).toFixed(1)} Token/s · 首字 ${Number(m.benchmark.firstTokenSeconds).toFixed(1)} 秒</small>`:''}${m.toolCalls?.length?`<details><summary>开发工具记录（${m.toolCalls.length}）</summary><pre>${esc(JSON.stringify(m.toolCalls,null,2))}</pre></details>`:''}${m.reasoning?`<details><summary>推理内容</summary><pre>${esc(m.reasoning)}</pre></details>`:''}${m.usage?`<small>${m.usage.known?`输入 ${num(m.usage.input)} · 输出 ${num(m.usage.output)} · 合计 ${num(m.usage.total)}`:'接口未返回用量'}</small>`:''}<div class="row"><button data-a="copyMessage" data-id="${i}">复制</button>${m.role==='assistant'&&/```(?:html)?\s*\n([\s\S]*?)```/i.test(m.content)?`<button data-a="applyHtml" data-id="${i}">HTML 新建项目</button>`:''}</div></div>`).join('')||'<div class="empty">描述你想做的应用，或在编辑器里<br>点“问 AI”，附上当前文件。</div>'}</div>${busy?'<div class="noticebar">模型正在处理，请保持应用打开。<br>取消后服务端仍可能计费。<button data-a="cancel">取消请求</button></div>':''}<div class="composer">${pendingImages.length?`<div class="attachments">${pendingImages.map((u,i)=>`<span class="attachment"><img src="${u}" alt="待发送的第 ${i+1} 张图片"><button data-a="dropImage" data-i="${i}" aria-label="移除这张图片">×</button></span>`).join('')}</div>`:''}<textarea id="prompt" aria-label="发送给 AI 的内容" placeholder="例如：做一个适合手机使用的录音任务清单"></textarea>${false?`<label><input type="checkbox" id="includeCode" ${includeCode?'checked':''}>附加当前文件：${esc(file)}（${num(project().files[file]?.length)} 字符）</label>`:''}<div class="row spread"><small>多轮上下文随请求发送</small><button data-a="pickImage" aria-label="添加图片" title="从相册选一张图，让 AI 看">📷</button><button class="primary" data-a="send" ${busy||!p?'disabled':''}>${project()&&aiEditMode==='auto'?'修改此项目 ↑':'发送 ↑'}</button></div></div></div>`;$('#aiProject').onchange=e=>{projectId=e.target.value||null;chatId=null;render()};if($('#aiEditMode')){$('#aiEditMode').value=aiEditMode;$('#aiEditMode').onchange=e=>{aiEditMode=e.target.value;render()}};if($('#githubResearch'))$('#githubResearch').onchange=e=>githubResearch=e.target.checked;$('#prompt').value=draft;$('#prompt').oninput=e=>{draft=e.target.value;send('draft',{text:draft})};$('#profileSelect').onchange=e=>{if(e.target.value==='__new__'){editProfile=null;detectedModels=[];page='settings';render();return;}profileId=e.target.value;render()};if($('#includeCode'))$('#includeCode').onchange=e=>includeCode=e.target.checked;
+function ai(){if(!chatId&&S.chats.length)chatId=S.chats.filter(x=>(x.projectId||null)===projectId).slice(-1)[0]?.id||null;const c=chat(),p=selectedProfile();if(p)profileId=p.id;const messages=c?c.messages:[];let usageRows=S.usage.filter(r=>r.chatId===chatId),known=usageRows.filter(r=>r.usage.known),sum=usageTotals(usageRows.filter(r=>usageSource(r)==='external_api')).total,stepSum=usageTotals(usageRows.filter(r=>usageSource(r)==='step_api')).total;app.innerHTML=`<div class="page ai-page">${header('YOUR MODELS','AI 编程助手','使用自己的 API，在本机保存对话。')}<details class="ai-setup"${aiSetupOpen?' open':''}><summary>模型与项目设置</summary><div class="row"><select id="profileSelect" class="grow" aria-label="模型配置">${S.profiles.map(x=>`<option value="${esc(x.id)}" ${x.id===profileId?'selected':''}>${esc(x.name)} · ${esc(x.model)}</option>`).join('')||'<option value="">尚未配置模型</option>'}<option value="__new__">＋ 新建模型配置…</option></select><button data-a="settings">API</button><button data-a="localModels">本地模型</button><button data-connect="catalog">连接器</button><button data-a="integrations">联网/GitHub</button><button data-a="memoryPage">记忆</button></div><div class="row" style="margin-top:10px"><button class="grow history-trigger" data-a="chatHistory" aria-haspopup="dialog" aria-controls="chatHistoryDrawer"><span>☰ 对话历史</span><span class="history-current">${esc(c?.name||'新对话')}</span></button><button data-a="newChat">＋</button><button data-a="exportChat">导出</button>${c?'<button class="danger" data-a="deleteChat">删除</button>':''}</div><small>当前对话：第三方 ${num(sum)} / 阶跃 API ${num(stepSum)} / 本地 ${num(usageTotals(usageRows.filter(r=>usageSource(r)==='local_model')).total)} token${usageRows.some(r=>!r.usage.known)?' ＋ 未知用量':''} · 仅统计本工作台</small>${p?`<div class="status">${p.protocol==='local'?'端侧离线 · '+esc(p.name):'发送至 '+esc(p.endpoint)+(p.hasKey?'':' · 尚未保存密钥')}</div>`:'<div class="noticebar">先添加模型配置。支持 Chat Completions 兼容接口和 Anthropic Messages。</div>'}${aiProjectCard()}${liveEditCard()}</details><div id="messages">${messages.map((m,i)=>`<div class="message ${m.role}"><small>${m.role==='user'?'你':'AI'}</small><div>${(m.images||[]).map(u=>`<img class="msg-img" src="${u}" alt="用户附上的图片" loading="lazy">`).join('')}${!m.images&&m.imageCount?`<small class="muted">（这条消息原本附了 ${m.imageCount} 张图，图片不会存进对话记录，重开对话后不再显示）</small>`:''}${m.edit?`<details><summary>查看 AI 返回的代码与说明</summary><pre>${esc(typeof m.content==='string'?m.content:JSON.stringify(m.content))}</pre></details>`:`<pre>${esc(typeof m.content==='string'?m.content:JSON.stringify(m.content))}</pre>`}</div>${m.edit?`<div class="noticebar">${esc(m.edit.message)}${m.edit.status==='review'?`<button data-a="reviewAiFiles" data-id="${i}">审查并应用</button>`:''}</div>`:''}${m.research?`<details><summary>GitHub 参考 · ${m.research.status==='failed'?'检索未成功':m.research.references.length+' 个候选'}</summary><pre>${esc(JSON.stringify(m.research,null,2))}</pre></details>`:''}${m.benchmark?.decodeTokensPerSecond?`<small>本机生成 ${Number(m.benchmark.decodeTokensPerSecond).toFixed(1)} Token/s · 首字 ${Number(m.benchmark.firstTokenSeconds).toFixed(1)} 秒</small>`:''}${m.toolCalls?.length?`<details><summary>开发工具记录（${m.toolCalls.length}）</summary><pre>${esc(JSON.stringify(m.toolCalls,null,2))}</pre></details>`:''}${m.reasoning?`<details><summary>推理内容</summary><pre>${esc(m.reasoning)}</pre></details>`:''}${m.usage?`<small>${m.usage.known?`输入 ${num(m.usage.input)} · 输出 ${num(m.usage.output)} · 合计 ${num(m.usage.total)}`:'接口未返回用量'}</small>`:''}<div class="row"><button data-a="copyMessage" data-id="${i}">复制</button>${m.role==='assistant'&&/```(?:html)?\s*\n([\s\S]*?)```/i.test(m.content)?`<button data-a="applyHtml" data-id="${i}">HTML 新建项目</button>`:''}</div></div>`).join('')||'<div class="empty">描述你想做的应用，或在编辑器里<br>点“问 AI”，附上当前文件。</div>'}</div>${busy?'<div class="noticebar">模型正在处理，请保持应用打开。<br>取消后服务端仍可能计费。<button data-a="cancel">取消请求</button></div>':''}<div class="composer">${pendingImages.length?`<div class="attachments">${pendingImages.map((u,i)=>`<span class="attachment"><img src="${u}" alt="待发送的第 ${i+1} 张图片"><button data-a="dropImage" data-i="${i}" aria-label="移除这张图片">×</button></span>`).join('')}</div>`:''}<textarea id="prompt" aria-label="发送给 AI 的内容" placeholder="例如：做一个适合手机使用的录音任务清单"></textarea>${false?`<label><input type="checkbox" id="includeCode" ${includeCode?'checked':''}>附加当前文件：${esc(file)}（${num(currentContent(project(),file).length)} 字符）</label>`:''}<div class="row spread"><small>多轮上下文随请求发送</small><button data-a="pickImage" aria-label="添加图片" title="从相册选一张图，让 AI 看">📷</button><button class="primary" data-a="send" ${busy||!p?'disabled':''}>${project()&&aiEditMode==='auto'?'修改此项目 ↑':'发送 ↑'}</button></div></div></div>`;$('#aiProject').onchange=e=>{projectId=e.target.value||null;chatId=null;render()};if($('#aiEditMode')){$('#aiEditMode').value=aiEditMode;$('#aiEditMode').onchange=e=>{aiEditMode=e.target.value;render()}};if($('#githubResearch'))$('#githubResearch').onchange=e=>githubResearch=e.target.checked;$('#prompt').value=draft;$('#prompt').oninput=e=>{draft=e.target.value;send('draft',{text:draft})};$('#profileSelect').onchange=e=>{if(e.target.value==='__new__'){editProfile=null;detectedModels=[];page='settings';render();return;}profileId=e.target.value;render()};if($('#includeCode'))$('#includeCode').onchange=e=>includeCode=e.target.checked;
   // 折叠区状态：展开时记住，下次渲染还开着
   const setup=document.querySelector('.ai-setup');
   if(setup)setup.addEventListener('toggle',()=>{aiSetupOpen=setup.open;});}
@@ -1664,10 +1760,16 @@ case 'replaceDo':{
   send('makeSnapshot',{projectId:p.id});
   let filesHit=0,total=0;
   const files=p.files||{};
+  /*
+   * 逐个文件读真实内容、替换、写进暂存区。
+   *
+   * 快照里的 files 是清单（路径 → 字节数），内容要按需取；
+   * 改完的结果放回 editBuffer，由 saveProject 统一发给原生。
+   */
   for(const n of Object.keys(files)){
-    const src=files[n]||'';
+    const src=fileContent(p,n);
     const c=countOcc(src,rpFind,rpCase);
-    if(c>0){files[n]=replaceIn(src,rpFind,rpWith,rpCase);filesHit++;total+=c}
+    if(c>0){editBuffer[n]=replaceIn(src,rpFind,rpWith,rpCase);filesHit++;total+=c}
   }
   if(total===0){notice('没有命中任何内容');break}
   p.updated=Date.now();
@@ -1682,7 +1784,25 @@ case 'fontMinus':codeFont=Math.max(9,codeFont-1);localStorage.setItem('codeFont'
 case 'gotoLine':send('askLine');break;
 case 'doGotoLine':gotoLine(data&&data.line||1);break;
 case 'fmToggle':fileCollapsed[id]=!fileCollapsed[id];filesPage();break;
-case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',p);break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(p.files[file]);p.files[file]=undo.pop();saveProject();$('#code').value=p.files[file]}break;case 'redo':if(redo.length){undo.push(p.files[file]);p.files[file]=redo.pop();saveProject();$('#code').value=p.files[file]}break;case 'findCode':{let q=prompt('查找文字');if(q){const t=$('#code'),pos=t.value.indexOf(q,t.selectionEnd);let at=pos>=0?pos:t.value.indexOf(q);if(at>=0){t.focus();t.setSelectionRange(at,at+q.length)}else notice('未找到')}break}case 'copyCode':send('copy',{text:p.files[file]});break;case 'aiCode':page='ai';includeCode=true;render();break;case 'chatHistory':openChatHistory();break;case 'newChat':newChat();break;case 'send':sendMessage();break;case 'pickImage':Neo.pickImage('{}');break;
+case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',{id:p.id});break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]=0;editBuffer[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];delete editBuffer[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(currentContent(p,file));editBuffer[file]=undo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'redo':if(redo.length){undo.push(currentContent(p,file));editBuffer[file]=redo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'findCode':{
+  let q=prompt('查找文字');if(!q)break;
+  const t=$('#code'),src=t.value;
+  /*
+   * 从当前光标往后找，到末尾还没找到就从头再找一遍 —— 这样连点「查找」
+   * 能一圈一圈往下跳。只 setSelectionRange 是不够的：匹配在视野外时
+   * 编辑器不会自动滚过去，用户会觉得「点了没反应」。
+   */
+  let at=src.indexOf(q,t.selectionEnd);
+  if(at<0)at=src.indexOf(q);
+  if(at<0){notice('未找到：'+q);break}
+  t.focus();
+  t.setSelectionRange(at,at+q.length);
+  // 按行号换算出纵向位置，把匹配行滚到编辑区中间
+  const lineOf=src.slice(0,at).split('\n').length;
+  const lineH=parseFloat(getComputedStyle(t).lineHeight)||20;
+  t.scrollTop=Math.max(0,(lineOf-1)*lineH-t.clientHeight/2);
+  notice('已定位到第 '+lineOf+' 行');
+  break}case 'copyCode':send('copy',{text:currentContent(p,file)});break;case 'aiCode':page='ai';includeCode=true;render();break;case 'chatHistory':openChatHistory();break;case 'newChat':newChat();break;case 'send':sendMessage();break;case 'pickImage':Neo.pickImage('{}');break;
  case 'integrations':page='integrations';window.integrationState=null;send('integrationConfig');render();break;
  case 'memoryPage':page='memory';window.memoryState=null;send('memorySkills',{projectId:projectId||''});render();break;
  case 'saveNet':send('netSettings',{searchProvider:$('#searchProvider')?$('#searchProvider').value:'',searchKey:$('#searchKey')?$('#searchKey').value:''});notice('已保存');send('integrationConfig');break;
