@@ -793,13 +793,30 @@ JSONObject call(String name,JSONObject args)throws Exception{
    int s=path.lastIndexOf('/');
    target=s<0?path:path.substring(s+1);
   }
+  /*
+   * 转成正则。
+   *
+   * <p><b>关键在两个星号后面跟着的斜杠：</b>
+   * 「src 目录下的所有 .ts」这种模式，由 src 前缀 + 任意层目录 + 斜杠 + *.ts 组成。
+   * 如果只是把两个星号换成点星，中间那个斜杠就变成了硬性的 ——
+   * 于是 {@code src/a.ts} 匹配不上（要 {@code src/} 后面还得多一层目录）。
+   *
+   * <p>而这恰恰是模型最常写的模式：它想搜 src 下面所有 .ts，
+   * 结果一条都没搜到，只能换个写法再试一轮。
+   *
+   * <p>所以「双星加斜杠」要整体变成「可选的任意层目录」，零层也能匹配。
+   */
   StringBuilder re=new StringBuilder("^");
   for(int i=0;i<g.length();i++){
    char c=g.charAt(i);
-   if(c=='*'){
-    if(i+1<g.length()&&g.charAt(i+1)=='*'){re.append(".*");i++;}
-    else re.append("[^/]*");
-   }else if(c=='?')re.append("[^/]");
+   if(c=='*'&&i+1<g.length()&&g.charAt(i+1)=='*'){
+    i++;
+    // **/ → 任意层目录（可以零层）
+    if(i+1<g.length()&&g.charAt(i+1)=='/'){re.append("(?:.*/)?");i++;}
+    // 结尾的 ** → 任意内容（可以跨目录）
+    else re.append(".*");
+   }else if(c=='*')re.append("[^/]*");
+   else if(c=='?')re.append("[^/]");
    else if("\\.[]{}()+-^$|".indexOf(c)>=0)re.append('\\').append(c);
    else re.append(c);
   }
@@ -818,7 +835,8 @@ JSONObject call(String name,JSONObject args)throws Exception{
   *   patch_file(path="src/a.ts", startLine=42, endLine=58, newContent="新的代码")
   * </pre>
   *
-  * <p>行号从 1 开始，含首尾。替换前会校验行号范围，
+  * <p>行号从 1 开始，endLine 是「不含」的上界（不传就只改 startLine 那一行）。
+  * 替换前会校验行号范围，
   * 并回显替换前后的片段，让模型能确认改对了地方。
   *
   * @param files 当前暂存的文件表

@@ -314,6 +314,20 @@ final class SelfTest {
    "a failed compile is not reported as ok");
   check(cc0!=null&&cc0.optString("error","").contains("右括号"),
    "the compile error text reaches the tool record");
+  /*
+   * glob 要匹配得上模型写得出来的样子。
+   *
+   * <p>「src 下的所有 .ts」是模型最常写的搜索模式。原来匹配不到
+   * src/a.ts，模型搜不到东西只会换个写法再试，白烧一轮。
+   */
+  check(LocalDevTools.globMatch("src/a.ts","src/**/*.ts"),
+   "a src glob matches a file directly under src");
+  check(LocalDevTools.globMatch("src/x/y/a.ts","src/**/*.ts"),
+   "a src glob matches a nested file");
+  check(!LocalDevTools.globMatch("lib/a.ts","src/**/*.ts"),
+   "a src glob does not match another directory");
+  check(LocalDevTools.globMatch("src/app/x.tsx","*.tsx"),
+   "a bare extension glob matches in any directory");
   check(autoAfter>=1,
    "the automatic snapshots are still kept");
   a.remove("projects","qa-snapkeep");
