@@ -164,6 +164,15 @@ ok('末尾有换行时不多出空行',
 ok('中间空行连 CRLF 一起保留',
   strip('1: a\r\n2: \r\n3: b\r\n') === 'a\r\n\r\nb\r\n',
   JSON.stringify(strip('1: a\r\n2: \r\n3: b\r\n')));
+/*
+ * 但「换成 CRLF」之前必须先把行尾统一 —— 模型是从 read_file 复制的片段，
+ * CRLF 文件读出来每行带 \r，贴回来的 newContent 已经有 \r\n；
+ * 再换一次就成 \r\r\n，每行多一个回车（比混进 LF 行严重）。
+ */
+ok('patch 前先把行尾统一成 \\n，换成 CRLF 才是幂等的',
+  tools.indexOf('String nc=newContent.replace("\\r\\n","\\n").replace("\\r","\\n");') >= 0,
+  '缺了归一化，CRLF 文件会被写成 \\r\\r\\n');
+
 /* patch 进 CRLF 文件的新内容，行尾也要是 CRLF，不能把文件弄成两种行尾 */
 ok('patch_file 会跟着文件的 CRLF 走',
   /if\(crLines\*2>list\.size\(\)\)nc=nc\.replace\("\\n","\\r\\n"\);/.test(tools),

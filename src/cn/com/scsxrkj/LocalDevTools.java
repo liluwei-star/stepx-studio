@@ -1253,8 +1253,20 @@ JSONObject call(String name,JSONObject args)throws Exception{
    numberedFile=currentLine.startsWith(start+": ");
   }
   if(!numberedFile)newContent=stripSnippetLineNumbers(newContent,start);
+  /*
+   * 新内容里的行尾先统一成 \n，再决定要不要按文件的风格换回去。
+   *
+   * <p><b>必须先统一。</b>模型是从 read_file 的结果里复制片段的，
+   * 而 CRLF 文件读出来的每行都以 \r 结尾 —— 它原样贴回来的 newContent
+   * 就已经带着 \r\n。这时候再执行一次「把 \n 换成 \r\n」，
+   * 得到的是 \r\r\n：每一行末尾多一个回车。
+   *
+   * <p>这个损坏比「混进 LF 行」严重得多 —— LF 只是风格不一致，
+   * 多出来的 \r 会跟着内容一起被别人读走（有些解析器把 \r 当字符）。
+   * 统一到 \n 之后再换，才是幂等的。
+   */
+  String nc=newContent.replace("\r\n","\n").replace("\r","\n");
   // newContent 末尾的换行是格式噪音，去掉，否则会多出空行
-  String nc=newContent;
   while(nc.endsWith("\n"))nc=nc.substring(0,nc.length()-1);
   /*
    * 文件是 CRLF 的话，新内容的换行也换成 CRLF。

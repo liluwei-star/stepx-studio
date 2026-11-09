@@ -409,7 +409,7 @@ final class SelfTest {
   check(autoAfter>=1,
    "the automatic snapshots are still kept");
   a.remove("projects","qa-snapkeep");
-  newChecks();
+  newChecks(a);
   check(a.memory.usageFor(muScope).indexOf("记忆用量")<0
     ||!a.memory.usageFor(muScope).contains("本项目"),
    "clearing the test scope removes it from the usage line");
@@ -2110,7 +2110,7 @@ final class SelfTest {
   * <p>单独放一个方法，是为了不必在巨大的 run() 里找插入点 ——
   * 那里面字符串和注释里的花括号让括号配平没法用来定位结尾。
   */
- static void newChecks()throws Exception{
+ static void newChecks(MainActivity a)throws Exception{
   /*
    * read_file 返回的内容每行带「12: 」这样的行号前缀。
    *
@@ -2178,6 +2178,27 @@ final class SelfTest {
     "the held-back file is named so the user knows what was skipped");
   }catch(Exception e){
    check(false,"salvage path failed: "+e.getMessage());
+  }
+  /*
+   * CRLF 文件被 patch 之后，行尾必须还是 CRLF，而且不能出现 \r\r。
+   *
+   * <p>模型是从 read_file 的结果里复制片段的，CRLF 文件读出来每行都以 \r 结尾，
+   * 它原样贴回来的 newContent 本身就带 \r\n。这时再执行一次「把 \n 换成 \r\n」，
+   * 得到的是 \r\r\n —— 每行末尾多一个回车。这种损坏比「混进 LF 行」严重，
+   * 因为多出来的 \r 会跟着内容被别人读走。
+   */
+  try{
+   LocalDevTools crlfDev=new LocalDevTools(a,new JSONObject().put("id","qa-crlf").put("name","CRLF")
+    .put("files",new JSONObject().put("index.html","<html>\r\n<body>\r\n</body>\r\n</html>")));
+   crlfDev.call("patch_file",new JSONObject().put("path","index.html").put("startLine",2)
+    .put("newContent","2: <body cls=x>\r\n3: <p>hi</p>"));
+   String crlfOut=crlfDev.staged.getJSONObject("files").getString("index.html");
+   check(!crlfOut.contains("\r\r"),
+    "patching a CRLF file never produces doubled carriage returns");
+   check(crlfOut.contains("<body cls=x>\r\n<p>hi</p>"),
+    "patched lines keep CRLF endings and the copied line numbers are stripped");
+  }catch(Exception e){
+   check(false,"crlf patch failed: "+e.getMessage());
   }
  }
 
