@@ -234,8 +234,17 @@ console.log('\n── 判据六：删图不能连累别的项目 ─────
 ok('删除单个文件不再自己删磁盘内容',
    !/String ref=bins\.getString\(path\);/.test(mainSrc) ||
    !/if\(ref\.endsWith\("\.bin"\)&&!stillReferenced/.test(mainSrc));
+/*
+ * 判据六这两条要紧跟实现：删除路径现在先把两张表都清一遍，
+ * 只有一处都没删到才报「文件不存在」，之后才轮到 gcBigFiles。
+ * 用 else-if 的旧写法会因为留下幽灵引用而漏回收。
+ */
 ok('删除单个文件后交给 gcBigFiles 统一回收',
-   /else throw new Exception\("文件不存在"\);[\s\S]{0,1200}?gcBigFiles\(\);/.test(mainSrc));
+   /if\(!had\)throw new Exception\("文件不存在"\);[\s\S]{0,1200}?gcBigFiles\(\);/.test(mainSrc));
+ok('删除时两张表都清，不留幽灵引用',
+   /boolean had=files\.has\(path\);[\s\S]{0,400}?if\(bins!=null&&bins\.has\(path\)\)\{[\s\S]{0,160}?had=true;/.test(mainSrc));
+ok('不再用「找到一张表就收工」的 else-if 删除',
+   !/\}else if\(bins!=null&&bins\.has\(path\)\)\{/.test(mainSrc));
 ok('彻底删除项目后回收它独占的大文件',
    /if\(note\.exists\(\)&&!note\.delete\(\)\)cleanup=false;[\s\S]{0,1500}?gcBigFiles\(\);/.test(mainSrc));
 ok('gcBigFiles 不再接受一个用不到的参数', !/void gcBigFiles\(JSONObject/.test(mainSrc));

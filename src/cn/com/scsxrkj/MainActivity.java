@@ -1480,30 +1480,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  }
  /** 项目历史里单条正文最多留多少字符 —— 全文在对话里，历史只留够回溯的摘要。 */
  static final int HISTORY_TEXT_CAP=4000;
- /** 项目历史最多留多少条。 */
- static final int HISTORY_KEEP=120;
- /**
-  * 裁剪项目历史。
+   /*
+  * 变更历史的上限由 ProjectEdits.trimHistory 统一负责。
   *
-  * <p><b>为什么必须裁：</b>每轮 AI 回复都往 {@code project.history} 追加一条，
-  * 里面带着那一轮的完整正文。一天几十轮、用上几周，这个数组能涨到几千条、
-  * 几 MB —— 而整个 state 是整份读写的，每次保存都要把它序列化一遍。
-  * 用户感受到的是「越用越卡、越用越容易崩」。
-  *
-  * <p>只留最近的 {@link #HISTORY_KEEP} 条：更早的记录对「我刚才让它改了什么」
-  * 已经帮不上忙，真正要回溯用的是快照（那是完整文件内容）。
-  *
-  * @param project 项目对象（会被就地修改）
+  * <p>history 有两条写入路径：AI 请求收尾（本轮，写正文摘要）、
+  * AI 改动落地（ProjectEdits.apply，写「改了几个文件」）。
+  * 上限只能有一处定义，两条路都用它，否则哪条路漏了就会无限长。
   */
- static void trimHistory(JSONObject project){
-  try{
-   JSONArray h=project.optJSONArray("history");
-   if(h==null||h.length()<=HISTORY_KEEP)return;
-   JSONArray kept=new JSONArray();
-   for(int i=h.length()-HISTORY_KEEP;i<h.length();i++)kept.put(h.opt(i));
-   project.put("history",kept);
-  }catch(Exception ignored){}
- }
  /** 把异常转成给人看的一句话，最多 220 字。 */
  String safeError(Exception e){String s=e.getMessage();return s==null?e.getClass().getSimpleName():s.length()>220?s.substring(0,220):s;}
  /**
@@ -2007,7 +1990,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      edit.put("message",salvageNote.isEmpty()?baseMessage:baseMessage+" —— "+salvageNote);
     }catch(Exception ex){edit.put("message",safeError(ex));}
     result.put("edit",edit);
-   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",editForStore(result.optJSONObject("edit"))).put("toolCalls",toolCallSummary(result.optJSONArray("toolCalls"))).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",clip(result.optString("text"),HISTORY_TEXT_CAP)).put("editBaseHash",baseline==null?"":Integer.toHexString(baseline.toString().hashCode())).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");trimHistory(project);project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){
+   }if(result!=null){try{JSONObject c=byId("chats",chat);c.getJSONArray("messages").put(new JSONObject().put("role","assistant").put("content",result.optString("text")).put("reasoning",result.optString("reasoning")).put("usage",result.getJSONObject("usage")).put("edit",editForStore(result.optJSONObject("edit"))).put("toolCalls",toolCallSummary(result.optJSONArray("toolCalls"))).put("benchmark",result.optJSONObject("benchmark")).put("research",result.optJSONObject("research")));}catch(Exception ignored){}if(!projectId.isEmpty()){try{JSONObject project=byId("projects",projectId);JSONArray h=project.optJSONArray("history");if(h==null){h=new JSONArray();project.put("history",h);}h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","api").put("provider",profile.optString("name")).put("chatId",chat).put("taskId",taskId).put("text",clip(result.optString("text"),HISTORY_TEXT_CAP)).put("editBaseHash",baseline==null?"":Integer.toHexString(baseline.toString().hashCode())).put("editStatus",result.optJSONObject("edit")==null?"":result.getJSONObject("edit").optString("status")));JSONArray tasks=project.optJSONArray("tasks");if(tasks!=null)for(int ti=0;ti<tasks.length();ti++)if(tasks.getJSONObject(ti).optString("id").equals(taskId))tasks.getJSONObject(ti).put("status","review");project.put("history",ProjectEdits.trimHistory(h));project.put("updated",System.currentTimeMillis());}catch(Exception ignored){}}}state.remove("pendingAi");saveState();}catch(Exception commitError){
     // 回滚：撤掉刚追加的 usage 条目（只多不多）
     try{JSONArray u=state.getJSONArray("usage");while(u.length()>usageBefore)u.remove(u.length()-1);}catch(Exception ignored){}
     throw commitError;
@@ -2168,6 +2151,16 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    if(n.length()==0)continue;
    if(dst!=null)dst.remove(n);
    if(bins!=null)bins.remove(n);
+   /*
+    * 哈希索引也要清。
+    * bigHashes 是「路径 → 内容 sha256」，供同步比对用。
+    * 文件删了索引还留着的话，这个路径会一直挂在索引里；
+    * 虽然同步只遍历 files/binaryFiles 不会读到它，
+    * 但状态文件会带着这些永远用不上的条目一路变大，
+    * 而且下次同路径重新导入时容易出现「哈希是新的、索引还是旧的」这种对不上的情况。
+    */
+   JSONObject hh=merged.optJSONObject("bigHashes");
+   if(hh!=null)hh.remove(n);
   }
  }
 
@@ -2666,6 +2659,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   if(files.has(from)){
    files.put(to,files.getString(from));
    files.remove(from);
+   /*
+    * 另一张表里的同名键也要清掉：历史数据里同一个路径可能同时挂在
+    * files 和 binaryFiles 上，只搬 files 会留下一个指向 .bin 的幽灵引用，
+    * 结果是「改名了但磁盘空间没释放，导出还多一个文件」。
+    */
+   if(bins!=null)bins.remove(from);
+   if(hashes!=null)hashes.remove(from);
   }else if(bins!=null&&bins.has(from)){
    String ref=bins.getString(from);
    /*
@@ -2680,6 +2680,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     if(!h.isEmpty())hashes.put(to,h);
    }
    bins.remove(from);
+   files.remove(from);
   }else throw new Exception("文件不存在");
 
   proj.put("updated",System.currentTimeMillis());
@@ -2738,12 +2739,28 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   JSONObject files=proj.getJSONObject("files");
   JSONObject bins=proj.optJSONObject("binaryFiles"),hashes=proj.optJSONObject("bigHashes");
 
-  if(files.has(path)){
-   files.remove(path);
-  }else if(bins!=null&&bins.has(path)){
+  /*
+   * 两张表都要清，不能「找到一张就收工」。
+   *
+   * <p>同一个路径理论上只会在 files 或 binaryFiles 其中一张表里，
+   * 但历史数据里出现过两张表都有同一个路径的情况（早期 AI 把文本写到
+   * 大文件路径上、导入时按扩展名分表又没清旧键）。这时候原来那种
+   * else-if 只删掉 files，binaryFiles 里那份留了下来：
+   * <ul>
+   *   <li>界面显示「已删除」，可变更视图里这个文件还在</li>
+   *   <li>gcBigFiles 认为它还被引用，磁盘上那份 .bin 永远不回收</li>
+   *   <li>导出 ZIP 时又把删掉的文件写回去</li>
+   * </ul>
+   * 所以这里改成两张表都走一遍，只要删到一处就算删成功。
+   */
+  boolean had=files.has(path);
+  if(had)files.remove(path);
+  if(bins!=null&&bins.has(path)){
    bins.remove(path);
-   if(hashes!=null)hashes.remove(path);
-  }else throw new Exception("文件不存在");
+   had=true;
+  }
+  if(hashes!=null)hashes.remove(path);
+  if(!had)throw new Exception("文件不存在");
 
   proj.put("updated",System.currentTimeMillis());
   upsert("projects",proj);
@@ -2797,6 +2814,8 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    // 批量过程中动到的大文件，最后统一清理磁盘
    final String[] usedDir=new String[1];
 
+   // 目标就等于原路径的文件数 —— 这些「移」了跟没移一样，不能算成功
+   int same=0;
    for(int i=0;i<paths.length();i++){
     String path=paths.getString(i);
     try{
@@ -2805,6 +2824,16 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
       if(!from.isEmpty()&&!path.startsWith(from))throw new Exception("文件不在源目录下");
       String suffix=path.substring(from.length());
       String target=to.isEmpty()?suffix:(to+"/"+suffix);
+      /*
+       * target 和 path 一样时（目标目录就是当前所在目录，或者 from/to 都空），
+       * renameOne 会直接 return。原来这里照样 ok++，于是「移动 20 个文件」
+       * 提示「已完成 20 个文件」，实际一个都没动 —— 用户以为整理过目录，
+       * 回头发现文件还在原处，还以为是同步出了问题。
+       */
+      if(target.equals(path)){
+       same++;
+       continue;
+      }
       renameOne(proj,path,target,usedDir);
      }
      ok++;
@@ -2821,7 +2850,10 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    // 大文件删除后，磁盘上那些已经没人引用的文件要收尾
    if(act.equals("delete")&&usedDir[0]!=null)gcBigFiles();
 
-   toast(fail==0?("已完成 "+ok+" 个文件"):("完成 "+ok+" 个，失败 "+fail+" 个："+firstErr));
+   StringBuilder msg=new StringBuilder();
+   msg.append(fail==0?("已完成 "+ok+" 个文件"):("完成 "+ok+" 个，失败 "+fail+" 个："+firstErr));
+   if(same>0)msg.append("；").append(same).append(" 个本来就在目标位置，没动");
+   toast(msg.toString());
   }catch(Exception e){toast("批量操作失败："+safeError(e));}
  }
 
@@ -3092,18 +3124,24 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  void removeOne(JSONObject proj,String path,String[] usedDir)throws Exception{
   JSONObject files=proj.getJSONObject("files");
   JSONObject bins=proj.optJSONObject("binaryFiles"),hashes=proj.optJSONObject("bigHashes");
+  /*
+   * 两张表都清 —— 理由同 deleteProjectFile：历史数据里同一个路径
+   * 可能同时挂在 files 和 binaryFiles 上，只删一张会留下幽灵引用，
+   * 让 gcBigFiles 永远不回收磁盘上那份 .bin。
+   */
+  boolean had=false;
   if(files.has(path)){
    files.remove(path);
-   return;
+   had=true;
   }
   if(bins!=null&&bins.has(path)){
    String ref=bins.getString(path);
    bins.remove(path);
-   if(hashes!=null)hashes.remove(path);
    if(ref.endsWith(".bin"))usedDir[0]=ref;
-   return;
+   had=true;
   }
-  throw new Exception("文件不存在："+path);
+  if(hashes!=null)hashes.remove(path);
+  if(!had)throw new Exception("文件不存在："+path);
  }
 
  /**
@@ -3126,6 +3164,12 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   if(files.has(from)){
    files.put(to,files.getString(from));
    files.remove(from);
+   /*
+    * 另一张表里的同名键一并清掉（历史数据里同一个路径可能两张表都有），
+    * 否则批量移动之后磁盘空间不释放、导出还会多出一个文件。
+    */
+   if(bins!=null)bins.remove(from);
+   if(hashes!=null)hashes.remove(from);
    return;
   }
   if(bins!=null&&bins.has(from)){
@@ -3139,6 +3183,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     if(!h.isEmpty())hashes.put(to,h);
    }
    bins.remove(from);
+   files.remove(from);
    return;
   }
   throw new Exception("文件不存在："+from);
@@ -3252,13 +3297,67 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   return safe.isEmpty()?"default":safe;
  }
 
- /** 目标路径是否可用：合法、没被占用、不是保留的入口文件。 */
+ /**
+  * 目标路径是否可用：合法、没被占用、不会造成「文件当目录」的结构冲突。
+  *
+  * <p><b>为什么要查结构冲突：</b>项目里的路径是平的键值对，
+  * {@code a} 和 {@code a/b.txt} 可以同时存在 —— 键不重复就算「没被占用」。
+  * 但导出的 ZIP 和解包工具都按目录树理解路径：先写一个叫 {@code a} 的文件，
+  * 再写 {@code a/b.txt}，解压时要么报错要么把 {@code a} 覆盖掉。
+  *
+  * <p>所以改名/移动/复制一律按目录树语义检查两个方向：
+  * <ul>
+  *   <li>目标下面还有文件（{@code to/...} 已存在）→ 目标位置被目录占着</li>
+  *   <li>目标的某一级父路径已经是个文件 → 没法把文件塞进一个文件里</li>
+  * </ul>
+  *
+  * @param proj 项目对象
+  * @param to   目标路径
+  * @param from 源路径（自身不算冲突，否则「原地不动」会被判成目标已存在）
+  */
  void checkTarget(JSONObject proj,String to,String from)throws Exception{
   if(!CloudFiles.path(to))throw new Exception("路径无效（不能以 / 开头，不能含 ..，每段要有内容）");
   if(CloudFiles.excluded(to))throw new Exception("这个路径类型不放进项目（依赖目录或敏感文件）");
-  if(!to.equals(from)){
-   JSONObject files=proj.getJSONObject("files"),bins=proj.optJSONObject("binaryFiles");
-   if(files.has(to)||(bins!=null&&bins.has(to)))throw new Exception("目标已存在："+to);
+  if(to.equals(from))return;
+  JSONObject files=proj.getJSONObject("files"),bins=proj.optJSONObject("binaryFiles");
+
+  if(files.has(to)||(bins!=null&&bins.has(to)))throw new Exception("目标已存在："+to);
+  // 源不存在时结构检查没有意义，交给调用方抛「文件不存在」
+  if(!files.has(from)&&!(bins!=null&&bins.has(from)))return;
+
+  checkStructure(proj,to,from);
+ }
+
+ /**
+  * 检查改名后会不会造出「文件当目录」的路径结构。
+  *
+  * <p>项目里的路径是平的键值对，{@code a} 和 {@code a/b.txt} 可以同时存在，
+  * 因为「键没重复」就算不冲突。但 ZIP 和解包工具按目录树理解路径：
+  * 先写一个叫 {@code a} 的文件，再写 {@code a/b.txt}，解压要么报错，
+  * 要么把 {@code a} 覆盖掉 —— 两种都不是用户想要的。
+  *
+  * <p>所以两个方向都查：目标下面已经有文件（目标位置其实是目录），
+  * 或者目标的某一级父路径已经是个文件（想把文件塞进文件里）。
+  *
+  * <p>抽成 static 是为了能脱离 Activity 单独跑自测。
+  *
+  * @param proj 项目对象
+  * @param to   目标路径
+  * @param from 源路径（自己不算冲突）
+  */
+ static void checkStructure(JSONObject proj,String to,String from)throws Exception{
+  String prefix=to+"/";
+  String[]tables={"files","binaryFiles"};
+  for(String table:tables){
+   JSONObject tb=proj.optJSONObject(table);
+   if(tb==null)continue;
+   java.util.Iterator<String> it=tb.keys();
+   while(it.hasNext()){
+    String k=it.next();
+    if(k.equals(from))continue;
+    if(k.startsWith(prefix))throw new Exception("目标位置被一个目录占着："+to+"（下面还有 "+k+"）");
+    if(to.startsWith(k+"/"))throw new Exception("上级「"+k+"」是一个文件，放不进去："+to);
+   }
   }
  }
 

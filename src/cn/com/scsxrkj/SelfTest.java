@@ -2324,6 +2324,51 @@ final class SelfTest {
    }catch(Exception e){staleGone=false;}
    check(staleGone,"rewriting a binary path as text clears the stale binary reference");
 
+   /*
+    * 改名不能造出「文件当目录」的路径结构。
+    *
+    * <p>项目里路径是平的键值对，a 和 a/b.txt 能同时存在 —— 键不重复就不算冲突。
+    * 但导出的 ZIP 按目录树理解路径：先写一个叫 a 的文件再写 a/b.txt，
+    * 解压要么报错要么把 a 覆盖掉。所以改名要按目录树语义检查两个方向。
+    */
+   JSONObject structProj=new JSONObject()
+    .put("id","qa-structure")
+    .put("name","Structure fixture")
+    .put("files",new JSONObject()
+     .put("index.html","<!doctype html><html><body>x</body></html>")
+     .put("assets/icon.png/backup.txt","x"))
+    .put("binaryFiles",new JSONObject().put("assets/photo.png","aaa.bin"));
+   boolean dirClash=false;
+   try{MainActivity.checkStructure(structProj,"assets/icon.png","index.html");}
+   catch(Exception e){dirClash=e.getMessage()!=null&&e.getMessage().contains("目录占着");}
+   check(dirClash,"renaming a file onto a name that already has files under it is rejected");
+
+   boolean fileClash=false;
+   try{MainActivity.checkStructure(structProj,"index.html/x.txt","assets/photo.png");}
+   catch(Exception e){fileClash=e.getMessage()!=null&&e.getMessage().contains("是一个文件");}
+   check(fileClash,"moving a file below a plain file is rejected");
+
+   boolean freeOk=true;
+   try{MainActivity.checkStructure(structProj,"home.html","index.html");}
+   catch(Exception e){freeOk=false;}
+   check(freeOk,"a rename to an unused path is still allowed");
+
+   /*
+    * 删除清单也要清掉哈希索引，否则删掉的路径会一直挂在 bigHashes 里。
+    */
+   JSONObject hashProj=new JSONObject()
+    .put("id","qa-hash-delete")
+    .put("name","Hash fixture")
+    .put("files",new JSONObject()
+     .put("index.html","<!doctype html><html><body>x</body></html>")
+     .put("gone.js","console.log(1)"))
+    .put("binaryFiles",new JSONObject().put("gone.png","abc.bin"))
+    .put("bigHashes",new JSONObject().put("gone.js","h1").put("gone.png","h2").put("index.html","h3"));
+   MainActivity.applyDeletes(hashProj,new JSONArray().put("gone.js").put("gone.png"));
+   JSONObject h2=hashProj.optJSONObject("bigHashes");
+   check(h2!=null&&!h2.has("gone.js")&&!h2.has("gone.png")&&h2.has("index.html"),
+    "the delete list also drops the stale hash index entries");
+
    boolean stillRejects=false;
    try{ProjectEdits.stage(new JSONObject()
      .put("id","qa-bin-edit3")

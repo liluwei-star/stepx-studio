@@ -11,6 +11,14 @@ import java.util.*;
  * <p>整个过程是原子的：要么整批改动全部生效，要么一个都不生效。
  */
 final class ProjectEdits {
+
+ /**
+  * 变更历史保留条数。
+  *
+  * <p>120 条约等于几十 KB —— 够用户回溯最近的改动，
+  * 又不会让每次状态推送都拖着一份越来越长的流水。
+  */
+ static final int HISTORY_KEEP=120;
  static boolean same(JSONObject a,JSONObject b)throws Exception{if(a.length()!=b.length())return false;Iterator<String> it=a.keys();while(it.hasNext()){String k=it.next();if(!b.has(k)||!Objects.equals(a.get(k),b.get(k)))return false;}return true;}
  static JSONObject parse(String text)throws Exception{
   /*
@@ -312,7 +320,39 @@ final class ProjectEdits {
    if(snapBins!=null)one.put("bins",snapBins);
    mine.put(one);
    out.put("snapshots",CloudFiles.trimSnapshots(snaps,mine)).put("files",next).put("updated",System.currentTimeMillis());
-  JSONArray h=out.optJSONArray("history");if(h==null)h=new JSONArray();h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","apply").put("text",source+" · "+changes.length()+" 个文件；运行验收待完成。"));out.put("history",h);return out;
+  /*
+   * 变更历史：追加一条，并裁到上限。
+   *
+   * <p>history 是项目「谁在什么时候改了什么」的流水，会自动跟着项目
+   * 同步、备份、进 GitHub。它跟聊天记录不是一回事，但同样没有天然尽头 ——
+   * 一个反复迭代的项目 apply 几百次，history 就有几百条，
+   * 而整个 state 每一轮都要序列化一次推给页面。
+   *
+   * <p>原来只在 MainActivity 里写了个 trimHistory（留最近 120 条），
+   * 但从来没人调用过 —— 于是这条上限实际上不存在。
+   * 裁在写入点最省事：追加之后立刻砍掉超出的部分。
+   */
+  JSONArray h=out.optJSONArray("history");
+  if(h==null)h=new JSONArray();
+  h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","apply").put("text",source+" · "+changes.length()+" 个文件；运行验收待完成。"));
+  out.put("history",trimHistory(h));
+  return out;
+ }
+
+ /**
+  * 把变更历史裁到最近 {@link #HISTORY_KEEP} 条。
+  *
+  * <p>为什么不整段清空：用户翻「这个文件是什么时候被谁改的」时，
+  * 最近几条才是他要找的。砍掉最旧的、留下最新的。
+  *
+  * @param h 历史数组
+  * @return 裁剪后的新数组（长度不超上限时原样返回）
+  */
+ static JSONArray trimHistory(JSONArray h){
+  if(h==null||h.length()<=HISTORY_KEEP)return h;
+  JSONArray kept=new JSONArray();
+  for(int i=h.length()-HISTORY_KEEP;i<h.length();i++)kept.put(h.opt(i));
+  return kept;
  }
  /**
   * 写文件协议的那一段措辞。
