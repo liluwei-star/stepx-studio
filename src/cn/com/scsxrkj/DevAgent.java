@@ -90,6 +90,27 @@ final class DevAgent {
  static final int MAX_CONSECUTIVE_FAIL_ROUNDS = 3;
 
  /**
+  * 把一段系统说明接到模型正文后面。
+  *
+  * <p><b>为什么不能直接覆盖：</b>熔断和轮数上限这两件事发生时，
+  * 模型上一轮往往已经说了话 ——「我把按钮改成圆角了，现在跑一下编译看看」。
+  * 把那段话直接 put 掉，用户看到的就只剩一段冷冰冰的机器提示，
+  * 助手自己的声音消失了。
+  *
+  * <p>用户是要跟助手对话，不是读一份运行日志。
+  * 助手说过的话必须留着，系统说明接在后面。
+  *
+  * @param body    模型这一轮说的正文
+  * @param notice  系统补充说明
+  * @return 合并后的正文；模型没说话时直接给说明
+  */
+ static String appendNotice(String body,String notice){
+  String b=body==null?"":body.trim();
+  if(b.isEmpty())return notice;
+  return b+"\n\n"+notice;
+ }
+
+ /**
   * 从模型回复里抠出那一个 JSON 对象。
   *
   * <p><b>为什么不能直接 {@code new JSONObject(text)}：</b>
@@ -1296,12 +1317,40 @@ final class DevAgent {
       if(why.length()>0)why.append("；");
       why.append(r.optString("name","?")).append("：").append(r.optString("error",""));
      }
-     response.put("incomplete",true).put("text",
+     /*
+      * 追加，不要覆盖。
+      *
+      * <p>模型这一轮可能已经说了话（「我改好了 X，现在跑一下编译」）。
+      * 直接 put 覆盖掉，用户看到的就只有一段机器文案，
+      * 助手的声音彻底消失 —— 这正是「AI 不像人」的观感来源之一。
+      */
+     response.put("incomplete",true);
+     /* 停止原因告诉调用方：界面提示别一律说「达到轮数上限」。 */
+     response.put("stopReason","tool_failure");
+     response.put("text",appendNotice(response.optString("text",""),
       "连续 "+MAX_CONSECUTIVE_FAIL_ROUNDS+" 轮工具调用全部失败，已停止本轮，避免继续空转。"
       +"\n失败原因："+(why.length()==0?"（未记录）":why.toString())
       +"\n\n请检查工具参数是否正确（比如文件路径是否存在、参数名是否写错），"
-      +"或者换个说法、把要求拆细一点再试。");
+      +"或者换个说法、把要求拆细一点再试。"));
      break;
+    }
+    /*
+     * 轮数上限（原生路径）。
+     *
+     * <p>降级路径到上限时会明确告诉用户「到上限了、但改好的文件照样写回」，
+     * 原生路径原来没有 —— 循环跑满 40 轮直接结束，
+     * 用户看到的是模型最后一段话，完全不知道这轮是被截断的。
+     *
+     * <p>而且原生路径的改动是通过暂存区导出的，
+     * 必须说清楚「改好了的会写回」，否则用户以为白干。
+     */
+    if(round==MAX_ROUNDS-1){
+     response.put("incomplete",true);
+     response.put("stopReason","round_limit");
+     response.put("text",appendNotice(response.optString("text",""),
+      "已达到本轮 "+MAX_ROUNDS+" 次工具调用循环上限，本轮到此为止。"
+      +"已经改好的文件仍然会写回项目（下面会列出改了什么），"
+      +"但这一轮没做完 —— 要接着做请再发一条消息，助手会从上次的进度继续。"));
     }
     continue;
    }
@@ -1424,11 +1473,13 @@ final class DevAgent {
      if(why.length()>0)why.append("；");
      why.append(r.optString("name","?")).append("：").append(r.optString("error",""));
     }
-    response.put("incomplete",true).put("text",
+    response.put("incomplete",true);
+    response.put("stopReason","tool_failure");
+    response.put("text",appendNotice(response.optString("text",""),
      "连续 "+MAX_CONSECUTIVE_FAIL_ROUNDS+" 轮工具调用全部失败，已停止本轮，避免继续空转。"
      +"\n失败原因："+(why.length()==0?"（未记录）":why.toString())
      +"\n\n请检查工具参数是否正确（比如文件路径是否存在、参数名是否写错），"
-     +"或者换个说法、把要求拆细一点再试。");
+     +"或者换个说法、把要求拆细一点再试。"));
     break;
    }
    /*
@@ -1438,10 +1489,12 @@ final class DevAgent {
     * 循环结束后 stagedFiles 照样会导出，改动照常写回。
     * 用户看到这句会以为白干了一场，模型也会据此重新规划、把已经做过的活重做一遍。
     */
-   if(round==MAX_ROUNDS-1)response.put("incomplete",true).put("text",
+   if(round==MAX_ROUNDS-1){response.put("incomplete",true);
+    response.put("stopReason","round_limit");
+    response.put("text",appendNotice(response.optString("text",""),
     "已达到本轮 "+MAX_ROUNDS+" 次工具调用循环上限，本轮到此为止。"
     +"已经改好的文件仍然会写回项目（下面会列出改了什么），"
-    +"但这一轮没做完 —— 要接着做请再发一条消息，助手会从上次的进度继续。");
+    +"但这一轮没做完 —— 要接着做请再发一条消息，助手会从上次的进度继续。"));}
   }
   /*
    * 导出本轮实际改动（暂存区 vs 原始项目）。

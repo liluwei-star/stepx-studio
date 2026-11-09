@@ -163,7 +163,10 @@ static String instructions(boolean project,boolean nativeTools){
   +"结果里 ok 是「这次验证通过了没有」。项目里没有测试文件时 ok 会是 false、ran 是 false —— "
   +"那表示没得跑，不是跑挂了，别当成代码有问题去反复改。"
   +"\n- run_script(code)：在隔离沙箱里跑一段 JS。可以 await fetch('/project.json') 读项目文件、"
-  +"console.log 看中间值、最后 window.__neoResult=... 交出返回值。适合验算数据、试算法、批量分析文件。"
+  +"console.log 看中间值。适合验算数据、试算法、批量分析文件。"
+  +"交出结果有两种写法，随便用一种：直接 return 值（最自然），或者赋值给 window.__neoResult。"
+  +"结果会在返回的 result 字段里；只有 console.log 的话结果在 log 里，模型拿不到。"
+  +"沙箱是只读的：你在里面改项目文件不会写回，要改得用 write_files / patch_file。"
   +"沙箱里没有 node、装不了 npm 包、也连不了网 —— 这是隔离，不是限制。";
 
  if(!project)return "本轮没有指定项目。用户问的是问题就先直接回答，别急着调工具；"

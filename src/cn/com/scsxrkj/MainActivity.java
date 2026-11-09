@@ -530,7 +530,27 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   String name=p.optString("name","本地项目"),label=action.equals("trash")?"删除项目":action.equals("restore")?"恢复项目":"彻底删除";
   String message=action.equals("trash")?"“"+name+"”将移到最近删除，源码、协作记录和快照可恢复。\n不会删除云端项目、已导出文件或已安装App。":action.equals("restore")?"将“"+name+"”恢复到本地项目，保留原代码、协作记录和构建记录。":"永久删除“"+name+"”的本地源码、协作记录、快照及工作台内的构建APK，无法恢复。\n云端项目、已导出文件、已安装App、独立AI对话与Token账本保留。";
   new AlertDialog.Builder(this,android.R.style.Theme_Material_Dialog_Alert).setTitle(label).setMessage(message).setPositiveButton(action.equals("trash")?"移到最近删除":label,(d,n)->{try{if(projectChangeBusy())throw new Exception("当前任务正在运行，请稍后再管理项目");synchronized(this){JSONObject old=state;state=ProjectTrash.apply(state,action,id,System.currentTimeMillis());try{saveState();}catch(Exception e){state=old;throw e;}}
-   boolean cleanup=true;if(action.equals("purge")&&id.matches("[A-Za-z0-9_-]+")){File[] files=new File(getFilesDir(),"builds").listFiles();if(files!=null)for(File f:files)if(f.getName().matches(java.util.regex.Pattern.quote(id)+"-(?:[0-9]+|unsigned)\\.apk")&&!f.delete())cleanup=false;}
+   boolean cleanup=true;
+   if(action.equals("purge")){
+    /* 构建缓存 */
+    if(id.matches("[A-Za-z0-9_-]+")){File[] files=new File(getFilesDir(),"builds").listFiles();if(files!=null)for(File f:files)if(f.getName().matches(java.util.regex.Pattern.quote(id)+"-(?:[0-9]+|unsigned)\\.apk")&&!f.delete())cleanup=false;}
+    /*
+     * 项目记忆文件也要删。
+     *
+     * <p>记忆按项目 id 存在 project-notes/<id>.md。原来彻底删除项目时
+     * 只清了构建 APK，这个文件留着 —— 项目没了，AI 记的「这个项目用哪套组件库」
+     * 还在磁盘上。更糟的是：项目 id 来自云端同步，是十六进制串，
+     * 新建/同步出同 id 的项目时，旧项目的记忆会直接串进新项目 ——
+     * 模型拿着另一个项目的约定改代码，改出来的东西看着对、其实是错的。
+     *
+     * <p>文件名规则和 AiMemory.projectFile 一致（同样的字符过滤），
+     * 所以这里必须用同一个方法算，不能各写一套。
+     */
+    try{
+     File note=new File(new File(getFilesDir(),"project-notes"),safeNoteName(id)+".md");
+     if(note.exists()&&!note.delete())cleanup=false;
+    }catch(Exception ignored){}
+   }
    sendState();event("projectChanged",new JSONObject().put("action",action).put("id",id));toast(cleanup?(action.equals("trash")?"已移到最近删除，可随时恢复":action.equals("restore")?"项目已恢复":"项目已彻底删除"):"项目已删除，但部分工作台构建缓存未能清理");
   }catch(Exception e){toast("操作未完成："+safeError(e));sendState();}}).setNegativeButton("取消",null).show();
  }
@@ -1724,7 +1744,17 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      if(shouldRejectWrite(client.cancelled,result.optBoolean("incomplete")))throw new Exception("已取消，没有写入文件");
      if(result.optBoolean("incomplete")){
       edit.put("partial",true);
-      edit.put("partialNote","本轮工具调用达到了轮数上限，已做的改动仍然写回，但这一轮没做完。");
+      /*
+       * 停止原因要分清。
+       *
+       * <p>incomplete 有两个来源：跑满 40 轮工具循环，和连续几轮工具全败熔断。
+       * 原来一律写「达到了轮数上限」—— 熔断时用户看到这句会以为只是没跑够，
+       * 而真实情况是「这条路走不通，换个说法再来」。
+       */
+      String reason=result.optString("stopReason","");
+      edit.put("partialNote","tool_failure".equals(reason)
+       ?"连续几轮工具调用都失败了，这一轮到此为止。已做的改动仍然写回，但这轮没做完 —— 换个说法或者把要求拆细一点再来。"
+       :"本轮工具调用达到了轮数上限，已做的改动仍然写回，但这一轮没做完。");
      }/*
      * 改动来源有两条，取先有的那条：
      *
@@ -2803,6 +2833,21 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   */
  static boolean shouldRejectWrite(boolean cancelled,boolean incomplete){
   return cancelled;
+ }
+
+ /**
+  * 项目记忆文件名（不含扩展名）。
+  *
+  * <p>规则必须和 {@code AiMemory.projectFile} 完全一致 ——
+  * 两处各写一套的话，删除项目时就找不到那个记忆文件，
+  * 删不掉的残留记忆会串进同 id 的新项目。
+  *
+  * @param id 项目 id
+  * @return 过滤成字母数字下划线的文件名主干
+  */
+ static String safeNoteName(String id){
+  String safe=(id==null?"":id).replaceAll("[^A-Za-z0-9_-]","_");
+  return safe.isEmpty()?"default":safe;
  }
 
  /** 目标路径是否可用：合法、没被占用、不是保留的入口文件。 */

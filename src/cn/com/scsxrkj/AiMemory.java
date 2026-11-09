@@ -52,9 +52,8 @@ final class AiMemory {
   * 直接拿来做文件名不安全，所以统一过滤成字母数字下划线。
   */
  File projectFile(String projectId){
-  String safe=(projectId==null?"":projectId).replaceAll("[^A-Za-z0-9_-]","_");
-  if(safe.isEmpty())safe="default";
-  return new File(memoryDir(),safe+".md");
+  /* 用同一个方法算文件名 —— MainActivity 删项目时也要按同样的规则找到它 */
+  return new File(memoryDir(),MainActivity.safeNoteName(projectId)+".md");
  }
 
  static String readText(File f){try{if(!f.exists())return "";try(InputStream in=new FileInputStream(f)){ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] buf=new byte[8192];int n;while((n=in.read(buf))>0)out.write(buf,0,n);return new String(out.toByteArray(),StandardCharsets.UTF_8);}}catch(Exception e){return "";}}

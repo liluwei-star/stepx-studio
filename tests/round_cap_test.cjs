@@ -49,13 +49,21 @@ check(/仍然写回/.test(main),
 
 console.log('\n── 上限提示不能说错 ─────────────────────────────');
 /* 那句错话在注释里被引用了（作为「原来写的是」的对照），所以只看实际赋值的文案 */
-const limitText=(agent.match(/if\(round==MAX_ROUNDS-1\)response\.put\("incomplete",true\)\.put\("text",[\s\S]{0,600}?\);/)||[''])[0];
+/*
+ * 上限提示现在走 appendNotice（追加，不是覆盖），所以匹配整块 if 语句。
+ * 原来只匹配单行的 response.put(...).put("text", ...)。
+ */
+const limitText=(agent.match(/if\(round==MAX_ROUNDS-1\)[\s\S]{0,900}?appendNotice\([\s\S]{0,600}?\);\}/)||[''])[0];
 check(limitText.length>0,'the limit message exists');
 check(!/本轮未写回/.test(limitText),'the limit message no longer claims nothing was written');
 check(/已经改好的文件仍然会写回项目/.test(agent),
  'the limit message says the changes are written back');
 check(/要接着做请再发一条消息/.test(agent),
  'the limit message tells the user how to continue');
+/* 原生路径以前根本没有上限提示 —— 现在两条路径都要有 */
+const limitBlocks=(agent.match(/if\(round==MAX_ROUNDS-1\)/g)||[]).length;
+check(limitBlocks>=2,
+ '原生路径和降级路径都有轮数上限提示（实际 '+limitBlocks+' 处）');
 
 console.log('\n── 提示词不要说假话 ─────────────────────────────');
 check(!/轮数不限/.test(tools),
