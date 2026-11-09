@@ -19,6 +19,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 /* 源码是 CRLF；断言里写的是 \n，先归一化再比，否则全部对不上 */
+const main = fs.readFileSync(path.join(ROOT, 'src/cn/com/scsxrkj/MainActivity.java'), 'utf8').replace(/\r\n/g, '\n');
 const app = fs.readFileSync(path.join(ROOT, 'assets/app.js'), 'utf8').replace(/\r\n/g, '\n');
 
 let pass = 0, fail = 0;
@@ -57,6 +58,21 @@ for (const [name, needle] of mustFlush) {
   const sendSeg = iSend >= 0 ? app.slice(iSend, iSend + 500) : '';
   ok('sendMessage 里确实调用了 flushNow', sendSeg.indexOf('flushNow()') >= 0);
 }
+
+console.log('\n── 切后台 / 锁屏 / 被回收前也要落盘 ────────────');
+/*
+ * 防抖是 400 毫秒。用户敲完最后一个字立刻按 home、或者直接锁屏，
+ * 那个定时器可能一次都没跑；后台被系统回收之后，网页里的暂存就没了。
+ * 三条路都挂上，随便哪条先来都能补上。
+ */
+ok('页面隐藏时 flush',
+  app.indexOf("document.visibilityState==='hidden'\)flushNow") >= 0
+  || /visibilitychange[^;]*flushNow\(\)/.test(app));
+ok('页面卸载时 flush', /addEventListener\('pagehide',\(\)=>flushNow\(\)\)/.test(app));
+ok('重载前 flush', /addEventListener\('beforeunload',\(\)=>flushNow\(\)\)/.test(app));
+ok('原生 onPause 也主动叫一次',
+  /if\(desk!=null\)desk\.evaluateJavascript\("try\{flushNow\(\)\}catch\(e\)\{\}",null\);/.test(main),
+  'MainActivity.onPause 没有 flush，切后台可能丢掉最后 400 毫秒的输入');
 
 console.log('\n── Ctrl+S 仍然立刻保存 ─────────────────────────');
 ok('快捷键走 saveProject（用户主动要求立刻存）',

@@ -132,12 +132,12 @@ check(agent.includes('stagedFiles'),'DevAgent 导出 stagedFiles');
 check(agent.includes('tools.finalChanges(new JSONObject())'),'stagedFiles 来自暂存区的实际改动');
 
 const main=readSrc('src/cn/com/scsxrkj/MainActivity.java');
-const mIdx=main.indexOf('JSONObject changes=result.optJSONObject("stagedFiles")');
+const mIdx=main.indexOf('JSONObject stagedNow=result.optJSONObject("stagedFiles")');
 check(mIdx>=0,'MainActivity 优先读 stagedFiles');
 if(mIdx>=0){
   const around=main.slice(mIdx,mIdx+600);
   check(around.includes('ProjectEdits.parse(result.optString("text"))'),'stagedFiles 为空时回退到文本 JSON');
-  check(mIdx<main.indexOf('ProjectEdits.apply(target,baseline,changes'),'stagedFiles 的判断在 apply 之前');
+  check(mIdx<main.indexOf('applyAiChanges(target,baseline,changes,edit)'),'stagedFiles 的判断在写回之前');
 }
 
 const edits=readSrc('src/cn/com/scsxrkj/ProjectEdits.java');

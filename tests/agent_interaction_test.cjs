@@ -102,7 +102,7 @@ const agent=readSrc('src/cn/com/scsxrkj/DevAgent.java');
 /* 原生路径：改动在 tool_calls 里，必须导出 */
 check(agent.includes('response.put("stagedFiles",stagedChanges)'),'DevAgent 导出 stagedFiles');
 /* 文本路径：改动在正文 JSON 里，也要能取到 */
-const idxMain=main.indexOf('JSONObject changes=result.optJSONObject("stagedFiles")');
+const idxMain=main.indexOf('JSONObject stagedNow=result.optJSONObject("stagedFiles")');
 check(idxMain>=0,'MainActivity 从 stagedFiles 起步');
 if(idxMain>=0){
   const around=main.slice(idxMain,idxMain+500);

@@ -1851,8 +1851,65 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     int usageBefore=state.getJSONArray("usage").length();
     try{if(client.usageSegments.length()==0)state.getJSONArray("usage").put(log);else for(int si=0;si<client.usageSegments.length();si++){JSONObject segment=client.usageSegments.getJSONObject(si);state.getJSONArray("usage").put(new JSONObject(log.toString()).put("id",rid+"-"+si).put("usage",segment.getJSONObject("usage")).put("elapsedMs",segment.optLong("elapsedMs")).put("status",segment.optString("status")));}
    if(result!=null&&research!=null){JSONObject brief=new JSONObject(research.toString());JSONArray rs=brief.getJSONArray("references");for(int ri=0;ri<rs.length();ri++){rs.getJSONObject(ri).remove("code");rs.getJSONObject(ri).remove("licenseText");}result.put("research",brief);}
-   if(result!=null&&baseline!=null&&!editMode.isEmpty()){
-    JSONObject edit=new JSONObject().put("projectId",projectId).put("mode",editMode).put("status","rejected");
+   /*
+    * 「只讨论」模式下模型也可能真的动了文件。
+    *
+    * <p>工具是跟着「本轮有没有目标项目」挂的 —— 只要项目绑定了，
+    * 读文件、改文件的工具就都在。用户选「只讨论项目」只是想先谈谈，
+    * 但模型完全可能顺手调 write_files。
+    *
+    * <p>而下面的写回分支原来要求 {@code !editMode.isEmpty()}：
+    * 只讨论模式下暂存区里的改动被<b>直接丢掉</b>，却没有任何提示。
+    * 用户看到的是「AI 说改好了」，打开项目一个字没变 ——
+    * 最伤信任的那种不一致。
+    *
+    * <p>既然模型已经动手了，就把它当成一次「待审查」交出来：
+    * 不自动写，也不静默丢，用户点一下才落地。
+    */
+   /*
+    * 先把「这一轮到底改了什么」算出来，再决定要不要写回。
+    *
+    * <p>顺序很要紧。原来是在「决定写回」之后才算改动：只讨论模式下
+    * 那个分支一开始就被跳过，改动连算都没算，直接消失 ——
+    * 模型嘴上说改好了，项目里一个字都没变，也没有任何提示。
+    */
+   JSONObject changes=new JSONObject();
+   if(result!=null){
+    JSONObject stagedNow=result.optJSONObject("stagedFiles");
+    if(stagedNow!=null&&stagedNow.length()>0)changes=stagedNow;
+    else{
+     try{changes=ProjectEdits.parse(result.optString("text"));}
+     catch(Exception parseError){
+      /*
+       * 模型这一轮根本没改文件 —— 这<b>不是错误</b>。
+       *
+       * <p>原来这里直接抛「模型没有交回可写入的文件改动」，于是用户在项目里
+       * 问一句「这个项目有多少个文件」，模型正常回答了，
+       * 屏幕上却多出一条红色报错 —— 纯问答本来就不会有文件改动。
+       *
+       * <p>只有一种情况算真出错：调了改文件的工具但一个都没成功。
+       * 那时改动为空，下面照常处理成「本轮没有改动」，
+       * 而工具的报错已经在对话里给用户看过了，不用再叠一条红字。
+       */
+      changes=stagedNow!=null?stagedNow:new JSONObject();
+     }
+     if(changes==null)changes=new JSONObject();
+    }
+   }
+   /*
+    * 「只讨论」模式下模型也可能真的动了文件。
+    *
+    * <p>工具是跟着「本轮有没有目标项目」挂的：只要项目绑定了，
+    * 读文件、改文件的工具就都在。用户选「只讨论项目」只是想先谈谈，
+    * 但模型完全可能顺手调 write_files。
+    *
+    * <p>既然它已经动手了，就把它当成一次「待审查」交出来：
+    * 不自动写，也不静默丢，用户点一下才落地。
+    */
+   String writeMode=editMode;
+   if(writeMode.isEmpty()&&changes.length()>0)writeMode="review";
+   if(result!=null&&baseline!=null&&!writeMode.isEmpty()){
+    JSONObject edit=new JSONObject().put("projectId",projectId).put("mode",writeMode).put("status","rejected");
     try{/*
       * 「取消」和「到达轮数上限」要分开处理。
       *
@@ -1880,40 +1937,9 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
       edit.put("partialNote","tool_failure".equals(reason)
        ?"连续几轮工具调用都失败了，这一轮到此为止。已做的改动仍然写回，但这轮没做完 —— 换个说法或者把要求拆细一点再来。"
        :"本轮工具调用达到了轮数上限，已做的改动仍然写回，但这一轮没做完。");
-     }/*
-     * 改动来源有两条，取先有的那条：
-     *
-     * ① stagedFiles —— 工具路径（原生 function calling）实际改动过的文件。
-     *    原生路径下模型把文件内容放在 tool_calls 里，最终文本是人话回答，
-     *    里面没有 files JSON。从文本里抠必然失败，模型改对了也等于没改。
-     *
-     * ② 文本里的 files JSON —— 降级路径（模型不支持 tools）才走这条。
-     */
-     JSONObject changes=result.optJSONObject("stagedFiles");
-     if(changes==null||changes.length()==0){
-      try{changes=ProjectEdits.parse(result.optString("text"));}
-      catch(Exception parseError){
-       JSONObject staged=result.optJSONObject("stagedFiles");
-       if(staged!=null){
-        changes=staged;
-       }else{
-        /*
-         * 模型这一轮根本没改文件 —— 这<b>不是错误</b>。
-         *
-         * <p>原来这里直接抛「模型没有交回可写入的文件改动」，
-         * 于是用户在项目里问一句「这个项目有多少个文件」，
-         * 模型正常回答了，屏幕上却多出一条红色报错 ——
-         * 因为纯问答本来就不会有文件改动。
-         *
-         * <p>只有一种情况算真出错：模型调了改文件的工具，但一个文件都没改动成功。
-         * 那时候改动为空，下面会照常处理成「本轮没有改动」，同时工具的报错
-         * 已经在对话里给用户看过了 —— 不用再叠一条吓人的红字。
-         */
-        changes=new JSONObject();
-       }
-      }
-     }JSONObject target=byId("projects",projectId);JSONObject updated=applyAiChanges(target,baseline,changes,edit);if(research!=null){JSONArray refs=new JSONArray(research.getJSONArray("references").toString());for(int ri=0;ri<refs.length();ri++){refs.getJSONObject(ri).remove("code");refs.getJSONObject(ri).remove("licenseText");}updated.put("sourceReferences",refs);}
-     if(editMode.equals("auto")){replaceProject(updated);edit.put("status",ProjectEdits.same(baseline,updated.getJSONObject("files"))?"unchanged":"applied");}
+     }
+     JSONObject target=byId("projects",projectId);JSONObject updated=applyAiChanges(target,baseline,changes,edit);if(research!=null){JSONArray refs=new JSONArray(research.getJSONArray("references").toString());for(int ri=0;ri<refs.length();ri++){refs.getJSONObject(ri).remove("code");refs.getJSONObject(ri).remove("licenseText");}updated.put("sourceReferences",refs);}
+     if(writeMode.equals("auto")){replaceProject(updated);edit.put("status",ProjectEdits.same(baseline,updated.getJSONObject("files"))?"unchanged":"applied");}
      else edit.put("status","review");
      /*
       * files/base 在抢救路径上已经填过就不要覆盖。
@@ -1927,7 +1953,9 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      String salvageNote=edit.optString("salvage","");
      String baseMessage=edit.get("status")!=null&&"unchanged".equals(edit.optString("status"))
       ?"这一轮没有改动文件。"
-      :(editMode.equals("auto")?"已保存到指定项目；可预览或构建 APK":"建议已生成，等待审查应用");
+      :(writeMode.equals("auto")?"已保存到指定项目；可预览或构建 APK":"建议已生成，等待审查应用");
+     /* 只讨论模式下动的手，要说清楚为什么冒出一个「待审查」 */
+     if(editMode.isEmpty())baseMessage="这一轮是「只讨论」，但 AI 实际改动了文件 —— 已转成待审查，确认后才写入。"+baseMessage;
      edit.put("message",salvageNote.isEmpty()?baseMessage:baseMessage+" —— "+salvageNote);
     }catch(Exception ex){edit.put("message",safeError(ex));}
     result.put("edit",edit);
@@ -1976,7 +2004,18 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      result.put("toolCalls",toolCallSummary(rawCalls));
      event("reply",result);
     }else event("error",err);
-  }catch(Exception e){event("error","结果记录失败，请导出当前对话保留内容");}finally{liveEdit=null;event("aiLive",new JSONObject());active=null;event("busy",false);sendState();JSONObject completed=result;String failure=err;runOnUiThread(()->{if(link!=null)link.aiFinished(chat,completed,failure);try{if(completed!=null&&completed.optJSONObject("edit")!=null&&completed.getJSONObject("edit").optString("status").equals("applied")){boolean image=completed.optBoolean("drewImage",false);if(image){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(this,byId("projects",projectId));localRunner.start();}}}catch(Exception ignored){event("artStatus","图片和代码已保存；可在项目中打开本地预览");}});}});
+  }catch(Exception e){event("error","结果记录失败，请导出当前对话保留内容");}finally{
+  /*
+   * 请求结束了，就把「进行中」这个标记摘掉 —— 成功和失败都一样。
+   *
+   * <p>这个标记是给「应用被杀、请求半途夭折」用的：下次启动看到它，
+   * 就补一条「上次生成中断了」的说明。可它原来只在成功提交那条路上会被清掉，
+   * 请求失败（比如服务端 400、超时）时它就留在存档里 ——
+   * 用户下次打开应用，会看到一条「上次生成因应用退出而中断」，
+   * 可上一轮其实已经明确报过错、也把话说完了，这条是凭空多出来的。
+   */
+  try{synchronized(this){state.remove("pendingAi");}saveState();}catch(Exception ignored){}
+  liveEdit=null;event("aiLive",new JSONObject());active=null;event("busy",false);sendState();JSONObject completed=result;String failure=err;runOnUiThread(()->{if(link!=null)link.aiFinished(chat,completed,failure);try{if(completed!=null&&completed.optJSONObject("edit")!=null&&completed.getJSONObject("edit").optString("status").equals("applied")){boolean image=completed.optBoolean("drewImage",false);if(image){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();localRunner=new LocalRunner(this,byId("projects",projectId));localRunner.start();}}}catch(Exception ignored){event("artStatus","图片和代码已保存；可在项目中打开本地预览");}});}});
  }
 
 
@@ -3809,7 +3848,26 @@ if(info==null||info.packageName==null||!info.packageName.equals(b.getString("pac
 
  @Override public void onResume(){super.onResume();handleIntent(getIntent());MatrixDevice.recover(this);if(updater!=null)updater.foreground=true;if(studio!=null)studio.onResume();if(desk!=null&&active==null&&(art==null||!art.busy)&&!IntegrationActivity.busy){loadState();sendState();}awake(prefs!=null&&prefs.getBoolean("awake",false));}
  /** 退到后台：停止自动联动、暂停网页、把 Cookie 刷到磁盘。 */
- @Override public void onPause(){if(updater!=null)updater.foreground=false;if(link!=null&&link.running)link.stop("应用进入后台，已停止后续自动步骤");if(studio!=null)studio.onPause();CookieManager.getInstance().flush();super.onPause();}
+ @Override public void onPause(){
+  /*
+   * 退到后台前，先把编辑器的防抖保存补上。
+   *
+   * <p>保存现在是 400 毫秒防抖（每敲一个字就重写整份 workspace.json 会卡）。
+   * 但用户敲完最后一个字立刻按 home 或锁屏时，那个定时器可能还没来得及跑 ——
+   * 而在后台被系统回收之后，网页里的暂存就没了，
+   * 用户回来只会觉得「明明改过，怎么还是旧的」。
+   *
+   * <p>所以这里直接叫页面跑一次 flushNow()。它自己会判断有没有待写的内容，
+   * 没有就是空转。网页那边的 visibilitychange / pagehide 也挂了一份，
+   * 三条路都指向同一个函数。
+   */
+  try{if(desk!=null)desk.evaluateJavascript("try{flushNow()}catch(e){}",null);}catch(Exception ignored){}
+  if(updater!=null)updater.foreground=false;
+  if(link!=null&&link.running)link.stop("应用进入后台，已停止后续自动步骤");
+  if(studio!=null)studio.onPause();
+  CookieManager.getInstance().flush();
+  super.onPause();
+ }
  /** 销毁：关掉所有对话框、取消进行中的请求、断开 JS 桥、释放 WebView。 */
  @Override public void onDestroy(){
  /*

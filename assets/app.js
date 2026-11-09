@@ -177,6 +177,17 @@ function flushNow(){
   clearTimeout(saveTimer);saveTimer=null;
   try{saveProject();}catch(e){}
 }
+/*
+ * 切后台、锁屏、被系统回收之前，先把待写的补上。
+ *
+ * <p>防抖是 400 毫秒。用户敲完最后一个字立刻按 home 键、或者直接锁屏，
+ * 这个定时器可能一次都不会跑 —— 表现就是「明明改了，回来发现没改」。
+ * 三种时机都挂上：页面隐藏、页面卸载、原生 onPause 主动来叫（见 MainActivity）。
+ * 多挂几次没有副作用，flushNow 自己会判断有没有东西要写。
+ */
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushNow();});
+window.addEventListener('pagehide',()=>flushNow());
+window.addEventListener('beforeunload',()=>flushNow());
 let pendingImages=[],detectedModels=[],draft=S.draft||'',includeCode=false,undo=[],redo=[],noticeTimer;aiLive=S.activeAi||{};
 const defaults=()=>{for(const k of ['projects','profiles','chats','usage','projectTrash'])if(!Array.isArray(S[k]))S[k]=[]};defaults();
 const project=()=>S.projects.find(x=>x.id===projectId),chat=()=>S.chats.find(x=>x.id===chatId),selectedProfile=()=>S.profiles.find(x=>x.id===profileId)||S.profiles[0];

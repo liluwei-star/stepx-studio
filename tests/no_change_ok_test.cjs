@@ -31,17 +31,21 @@ console.log('\n── 纯问答不该报错 ────────────
 check(!/throw new Exception\("模型没有交回可写入的文件改动/.test(main),
  'a question that changes nothing no longer throws');
 
-check(/JSONObject staged=result\.optJSONObject\("stagedFiles"\);\s*if\(staged!=null\)\{\s*changes=staged;\s*\}else\{/.test(main),
+/*
+ * 解析失败时落回空改动集合，而不是抛异常。
+ * 现在的写法是 catch 里取一次 stagedFiles，没有就 new JSONObject()。
+ */
+check(/catch\(Exception parseError\)\{[\s\S]{0,600}?changes=stagedNow!=null\?stagedNow:new JSONObject\(\);/.test(main),
  'the empty-change case is now handled instead of thrown');
 
-check(/changes=new JSONObject\(\);\s*\}\s*\}\s*\}\s*JSONObject target=byId/.test(main.replace(/\r/g,'')),
+check(/JSONObject changes=new JSONObject\(\);/.test(main),
  'an empty change set is used when the model changed nothing');
 
 check(/这一轮没有改动文件/.test(main),
  'the user is told plainly that nothing changed');
 
 // stagedFiles 仍然是第一优先来源
-const stagedAt=main.indexOf('JSONObject changes=result.optJSONObject("stagedFiles")');
+const stagedAt=main.indexOf('JSONObject stagedNow=result.optJSONObject("stagedFiles")');
 const parseAt=main.indexOf('changes=ProjectEdits.parse(result.optString("text"))');
 check(stagedAt>0&&parseAt>stagedAt,
  'tool-path changes are still preferred over parsing the text');
