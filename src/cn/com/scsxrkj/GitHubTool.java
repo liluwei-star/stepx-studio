@@ -363,6 +363,26 @@ final class GitHubTool {
   * <p>内容这条线宁可多拦一点：宁可漏传一个配置文件，
   * 也不能把密钥传上去。用户在 skipped 列表里能看见被拦了什么。
   */
+ /**
+  * 这个值是不是占位符。
+  *
+  * <p>示例配置里到处是 {@code YOUR_KEY_HERE}、{@code changeme}、{@code xxxx}。
+  * 它们形似密钥但不是，拦下来只会让用户觉得「明明没填值却不让传」。
+  * 判据是值里出现这些约定俗成的词，出现就放行。
+  *
+  * <p>注意方向：这里放行的是<b>占位符</b>，不是放行所有短值 ——
+  * 长度门槛（8 位、16 位）仍然照旧，真正的密钥不会有这么短。
+  */
+ static boolean placeholderValue(String v){
+  if(v==null)return true;
+  String s=v.toLowerCase(java.util.Locale.ROOT);
+  String[] words={"your","example","placeholder","changeme","change_me","change-me",
+   "replace","dummy","sample","fake","todo","xxxx","<",">","{","}","...","***",
+   "none","null","undefined","here","insert","put_your"};
+  for(String w:words)if(s.contains(w))return true;
+  return false;
+ }
+
  static String secretReason(String path,String content){
   String p=(path==null?"":path).toLowerCase(java.util.Locale.ROOT);
   String name=p;
@@ -374,6 +394,19 @@ final class GitHubTool {
    "keystore","keystore.properties","signing.properties","local.properties",
    "id_rsa","id_dsa","id_ecdsa","id_ed25519","service-account.json"};
   for(String s:sensitiveNames)if(name.equals(s))return "敏感文件（可能含密钥或签名材料），已跳过上传";
+  /*
+   * .env 的变体要整族拦住。
+   *
+   * <p>原来只精确匹配 .env / .env.local / .env.production / .env.development 四个名字。
+   * 但实际项目里满地都是 .env.bak、.env.old、.env.test、.env.staging、.env.save ——
+   * 用户手动备份一份就把密钥备份出来了，而 .env.example 被填了真值的情况也不少。
+   * 「宁可多拦一个配置文件，也别把密钥传上去」—— 拦下来会在 skipped 里写明原因。
+   */
+  if(name.startsWith(".env")||name.endsWith(".env")||".envrc".equals(name))
+   return "环境变量文件（可能含密钥），已跳过上传";
+  // git 凭据缓存文件，名字不是精确的 credentials
+  if(name.equals(".git-credentials")||name.equals(".gitconfig.bak"))
+   return "Git 凭据文件，已跳过上传";
   /* 敏感后缀 */
   String[] sensitiveEnds={".pem",".key",".p12",".pfx",".jks",".keystore",".ppk"};
   for(String s:sensitiveEnds)if(name.endsWith(s))return "密钥/证书文件（."+s.substring(1)+"），已跳过上传";
@@ -389,29 +422,95 @@ final class GitHubTool {
    if(lower.contains("-----begin private key-----")||lower.contains("-----begin rsa private key-----")
     ||lower.contains("-----begin openssh private key-----")||lower.contains("-----begin ec private key-----"))
     return "内容里含私钥，已跳过上传";
-   String[] patterns={
-    /*
-     * 键名可以带引号（JSON 写法），也可以不带（.env / YAML 写法）。
-     * 所以每条模式都写成「可选引号 + 键名 + 可选引号」。
-     * 早先只匹配不带引号的键名，JSON 里的 api_key 全漏了。
-     */
-    "\"?api[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?secret[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?access[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?refresh[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?client[_-]?secret\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?private[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?auth[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?password\"?\s*[=:]\s*[\"'][^\"'\s]{8,}",
-    "\"?aws[_-]?secret[_-]?access[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?secret\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
-    "\"?token\"?\s*[=:]\s*[\"'][^\"'\s]{16,}"
+   /*
+    * 带引号的形式：{"api_key": "xxxx"}
+    *
+    * <p>值用捕获组取出来，先过一遍占位符判断 —— 示例配置里
+    * {"api_key": "YOUR_KEY_HERE"} 这种写法很常见，拦掉它会让用户
+    * 以为工具坏了（明明没填真值却不让传）。
+    */
+   String[] quoted={
+    "\"?api[_-]?key\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?secret[_-]?key\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?access[_-]?token\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?refresh[_-]?token\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?client[_-]?secret\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?private[_-]?key\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?auth[_-]?token\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?password\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?aws[_-]?secret[_-]?access[_-]?key\"?\\s*[=:]\\s*[\"']([^\"'\\s]{8,})",
+    "\"?secret\"?\\s*[=:]\\s*[\"']([^\"'\\s]{12,})",
+    "\"?token\"?\\s*[=:]\\s*[\"']([^\"'\\s]{16,})"
 };
+   for(String pat:quoted){
+    try{
+     java.util.regex.Matcher m=java.util.regex.Pattern.compile(pat,java.util.regex.Pattern.CASE_INSENSITIVE).matcher(content);
+     if(m.find()&&!placeholderValue(m.group(1)))return "内容里疑似有密钥，已跳过上传";
+    }catch(Exception ignored){}
+   }
+   /*
+    * 不带引号的形式：docker-compose、systemd、shell 导出、纯文本配置。
+    *
+    * <pre>
+    * environment:
+    *   - API_KEY=abcdef1234567890
+    * export GITHUB_TOKEN=xyz...
+    * </pre>
+    *
+    * <p>上面那组模式要求值带引号，这一大类全都漏了 —— 而 docker-compose
+    * 恰好是最常见的「把密钥写进版本库」的方式之一。
+    * 这里要求键名出现在行首、值不少于 16 位且不含空格，
+    * 免得把「# API_KEY 说明」这种注释也当成赋值。
+    */
+   String[] bare={
+    "(?m)^\\s*(?:export\\s+)?[A-Za-z0-9_]*(?:API[_-]?KEY|SECRET[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|PRIVATE[_-]?KEY|TOKEN)\\s*[=:]\\s*([A-Za-z0-9_\\-+/.]{16,})\\s*$"
+};
+   for(String pat:bare){
+    try{
+     java.util.regex.Matcher m=java.util.regex.Pattern.compile(pat,java.util.regex.Pattern.CASE_INSENSITIVE).matcher(content);
+     if(m.find()&&!placeholderValue(m.group(1)))return "内容里疑似有密钥，已跳过上传";
+    }catch(Exception ignored){}
+   }
 
-
-   for(String pat:patterns){
-    try{if(java.util.regex.Pattern.compile(pat,java.util.regex.Pattern.CASE_INSENSITIVE).matcher(content).find())
-     return "内容里疑似有密钥，已跳过上传";}catch(Exception ignored){}
+   /*
+    * 第二条线：认密钥本身的形状。
+    *
+    * <p>上面的模式全靠「键名 + 赋值」，能抓住 api_key: "xxx"、password = "yyy" 这类写法。
+    * 但密钥被硬编码进源码时，变量名往往毫无提示：
+    *
+    * <pre>
+    * const gh = "ghp_xxxxxxxx";            // 变量名叫 gh
+    * const k = "sk-proj-xxxx";             // 变量名叫 k
+    * static final String AWS = "AKIA...";  // 变量名叫 AWS
+    * </pre>
+    *
+    * <p>这三种一个都匹配不上。好在各家密钥有<b>固定的前缀和长度</b>，
+    * 认形状比认变量名可靠得多，也几乎不会误伤 —— 正文里凭空出现一串
+    * sk- 开头四十位随机串，本来就只可能是密钥。
+    *
+    * <p>GitHub 尤其致命：这个功能本身就是往 GitHub 推代码，
+    * 把 GitHub 令牌推进仓库等于把钥匙挂在门上。
+    */
+   String[] shapes={
+    "sk-ant-[A-Za-z0-9_-]{20,}",          // Anthropic
+    "sk-proj-[A-Za-z0-9_-]{20,}",         // OpenAI project key
+    "sk-[A-Za-z0-9]{32,}",                // OpenAI 旧格式
+    "ghp_[A-Za-z0-9]{20,}",               // GitHub personal access token
+    "gho_[A-Za-z0-9]{20,}",               // GitHub OAuth
+    "ghs_[A-Za-z0-9]{20,}",               // GitHub server-to-server
+    "ghu_[A-Za-z0-9]{20,}",               // GitHub user-to-server
+    "github_pat_[A-Za-z0-9_]{20,}",       // GitHub fine-grained PAT
+    "(?:AKIA|ASIA)[A-Z0-9]{16}",          // AWS access key id
+    "AIza[A-Za-z0-9_-]{30,}",             // Google API key
+    "xox[baprs]-[A-Za-z0-9-]{10,}",       // Slack token
+    "glpat-[A-Za-z0-9_-]{15,}",           // GitLab PAT
+    "hf_[A-Za-z0-9]{30,}",                // HuggingFace token
+    "npm_[A-Za-z0-9]{30,}",               // npm token
+    "https://hooks\\.slack\\.com/services/[A-Za-z0-9/]{20,}" // Slack webhook
+   };
+   for(String pat:shapes){
+    try{if(java.util.regex.Pattern.compile(pat).matcher(content).find())
+     return "内容里出现已知格式的密钥，已跳过上传";}catch(Exception ignored){}
    }
   }
   return null;

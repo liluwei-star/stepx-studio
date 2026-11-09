@@ -46,8 +46,11 @@ function extractMethod(src, signature) {
 let javaSrc;
 try {
   const m = extractMethod(gh, 'static String secretReason(String path,String content)');
+  // secretReason 依赖 placeholderValue 判断占位符，要一起抽出来
+  const ph = extractMethod(gh, 'static boolean placeholderValue(String v)');
   javaSrc = `
 public class Probe{
+ ${ph}
  ${m}
  public static void main(String[] a){
   for(int i=0;i+1<a.length;i+=2){
