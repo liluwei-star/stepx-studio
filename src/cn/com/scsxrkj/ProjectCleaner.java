@@ -346,9 +346,27 @@ final class ProjectCleaner {
         return null;
     }
 
-    /** 匹配 `from '...'` 和 `import '...'` 里的模块路径。 */
+    /**
+     * 匹配源码里引用另一个模块路径的几种写法。
+     *
+     * <p>原来只认 {@code from '...'} 和 {@code import '...'}（要求关键字后面紧跟空白再加引号），
+     * 于是下面两类全都漏掉了：
+     *
+     * <pre>
+     * const mod = await import('./lazy/page');      // 动态 import，关键字后面是括号
+     * const manifest = require('./capsule/manifest.json');
+     * </pre>
+     *
+     * <p>动态 import 是代码分割和懒加载的标准写法，JSON 配置用 require 也很常见。
+     * 漏掉它们的后果和普通 import 一样：文件被当成「平台痕迹」删掉，
+     * 构建或运行到那一行才炸，而界面只显示一行「找不到本地文件」。
+     *
+     * <p>所以关键字后面允许一个可选的左括号。反向误伤可以接受 ——
+     * 注释里写的一句 {@code // import './x'} 也会被当成引用，
+     * 最多是多保留一个文件，比误删安全得多。
+     */
     private static final java.util.regex.Pattern IMPORT_SPEC =
-            java.util.regex.Pattern.compile("(?:from|import)\\s+['\"]([^'\"\\n]+)['\"]");
+            java.util.regex.Pattern.compile("(?:from|import|require)\\s*\\(?\\s*['\"]([^'\"\\n]+)['\"]");
 
     /**
      * 算出「源码还在 import 的文件」。
