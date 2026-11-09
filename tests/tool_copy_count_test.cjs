@@ -63,6 +63,8 @@ function grabMethod(java, signature) {
   throw new Error(signature + ' unterminated');
 }
 const leanMethod = grabMethod(tools, 'static JSONObject leanCopy(JSONObject project)throws Exception{');
+/* leanCopy 现在走浅拷贝，依赖这个辅助方法，要一起搬出来 */
+const shallowMethod = grabMethod(tools, 'static JSONObject shallowStrings(JSONObject src)throws Exception{');
 
 const readsOfOriginal = [...tools.matchAll(/original\.(opt|get)(JSONObject|String|Int|Boolean|JSONArray)?\(?/g)].map(m => m[0]);
 ok('original 的每个读取点都只取 files',
@@ -137,7 +139,7 @@ __METHOD__
 
 const dir = path.join(ROOT, 'tests', '.tmp-copycount');
 fs.mkdirSync(path.join(dir, 'cn', 'com', 'scsxrkj'), { recursive: true });
-fs.writeFileSync(path.join(dir, 'cn', 'com', 'scsxrkj', 'CopyCount.java'), HARNESS.replace('__METHOD__', leanMethod));
+fs.writeFileSync(path.join(dir, 'cn', 'com', 'scsxrkj', 'CopyCount.java'), HARNESS.replace('__METHOD__', shallowMethod + '\n\n' + leanMethod));
 
 const shimDir = path.join(ROOT, 'tests', 'support', 'orgjson');
 const jdkHome = process.env.JAVA_HOME || 'C:/Users/llw/tools/jdk/jdk-21.0.2';

@@ -27,7 +27,22 @@ final class LocalRunner {
  synchronized JSONObject report()throws Exception{return new JSONObject().put("ready",ready).put("closed",closed).put("events",new JSONArray(events.toString()));}
  synchronized void record(String kind,String message){try{if(events.length()>=100)events.remove(0);events.put(new JSONObject().put("kind",kind).put("message",message).put("time",System.currentTimeMillis()));}catch(Exception ignored){}}
  LocalRunner(MainActivity activity,JSONObject source)throws Exception{
-  a=activity;projectId=source.getString("id");project=new JSONObject().put("files",new JSONObject(source.getJSONObject("files").toString())).put("binaryFiles",source.optJSONObject("binaryFiles")==null?new JSONObject():new JSONObject(source.getJSONObject("binaryFiles").toString()));
+  a=activity;projectId=source.getString("id");
+ /*
+  * 用浅拷贝而不是 new JSONObject(x.toString())。
+  *
+  * <p>后者先把整张「路径 → 文本」表序列化成一个完整 JSON 字符串再解析回来，
+  * 一个几十 MB 的工程会因此在内存里同时存在原表、这份字符串、新表三份。
+  * 本机运行本来就要再起一个 WebView 跑编译器，内存本就紧张，
+  * 多出来这一份很容易把应用顶掉。
+  *
+  * <p>这里只建新的映射表，值仍然指向原来的 String —— 本类只读不写，
+  * 共享同一个不可变实例完全安全。
+  */
+ project=new JSONObject()
+   .put("files",LocalDevTools.shallowStrings(source.getJSONObject("files")))
+   .put("binaryFiles",source.optJSONObject("binaryFiles")==null?new JSONObject()
+     :LocalDevTools.shallowStrings(source.getJSONObject("binaryFiles")));
   // 大文件的哈希索引必须一起带过来。
   // 不带的话 CloudFiles.entries() 校验 .bin 引用时找不到 sha256，
   // 直接抛「大文件缺少哈希」，整个构造失败 ——
