@@ -188,16 +188,40 @@ final class DevAgent {
   * <p>Anthropic 格式：{@code {"role":"assistant","content":[{"type":"tool_use","id":...,"name":...,"input":{...}}]}}
   */
  static JSONObject assistantToolCallMessage(JSONObject response,JSONArray calls,String protocol)throws Exception{
-  if("anthropic".equals(protocol)){
-   JSONArray content=new JSONArray();
-   for(int i=0;i<calls.length();i++){
-    JSONObject call=calls.optJSONObject(i);
-    if(call==null)continue;
-    content.put(new JSONObject().put("type","tool_use").put("id",call.optString("id"))
-     .put("name",call.optString("name")).put("input",call.optJSONObject("args")));
+ if("anthropic".equals(protocol)){
+  JSONArray content=new JSONArray();
+  /*
+   * 模型这一轮说的正文要一并带回去。
+   *
+   * <p>原来只放 tool_use 块，模型自己说过的话在历史里就消失了 ——
+   * 下一轮它会以为自己什么都没说过，于是重复解释、或者以为自己
+   * 已经答过而不再回答用户。
+   *
+   * <p>Anthropic 的 content 是数组，text 块和 tool_use 块可以混着放。
+   */
+  String said=response.optString("text","");
+  if(!said.trim().isEmpty())content.put(new JSONObject().put("type","text").put("text",said));
+  for(int i=0;i<calls.length();i++){
+   JSONObject call=calls.optJSONObject(i);
+   if(call==null)continue;
+   /*
+    * input 必须是对象。
+    *
+    * <p>参数解析失败时 args 是 null，直接塞进去 Anthropic 会拒（400）。
+    * 退一步用空对象，同时把「参数是坏的」写进 input，
+    * 让模型在下一轮看得见自己这次没写成。
+    */
+   JSONObject input=call.optJSONObject("args");
+   if(input==null){
+    input=new JSONObject();
+    String bad=call.optString("argsError","");
+    if(!bad.isEmpty())input.put("_argsError","这次的参数不是完整合法的 JSON，系统没能解析出来");
    }
-   return new JSONObject().put("role","assistant").put("content",content);
+   content.put(new JSONObject().put("type","tool_use").put("id",call.optString("id"))
+    .put("name",call.optString("name")).put("input",input));
   }
+  return new JSONObject().put("role","assistant").put("content",content);
+ }
   JSONArray toolCalls=new JSONArray();
   for(int i=0;i<calls.length();i++){
    JSONObject call=calls.optJSONObject(i);
@@ -210,15 +234,33 @@ final class DevAgent {
     * 而它记得自己明明写了 path —— 两边对不上，它只会更困惑，
     * 下一轮很可能再原样发一次。
     */
+   /*
+    * arguments 必须是能解析成 JSON 的字符串。
+    *
+    * <p>参数解析失败时 argsError 里是模型发过的原文，可能缺引号、括号不配对。
+    * 原样塞回去，服务端下一轮解析这个 arguments 会直接 400 ——
+    * 于是模型改对了参数也永远走不下去。
+    *
+    * <p>所以坏参数回传 {}，把「原文是坏的」写进工具结果那条消息，
+    * 让模型看得见自己没写成，而不是让服务端炸掉。
+    */
    String argsText=call.optString("argsError","");
-   if(argsText.isEmpty())argsText=args==null?"{}":args.toString();
+   if(!argsText.isEmpty())argsText="{}";
+   else argsText=args==null?"{}":args.toString();
    toolCalls.put(new JSONObject().put("id",call.optString("id")).put("type","function")
     .put("function",new JSONObject().put("name",call.optString("name"))
      .put("arguments",argsText)));
   }
-  return new JSONObject().put("role","assistant")
-   .put("content",response.optString("text",""))
-   .put("tool_calls",toolCalls);
+  /*
+   * 有 tool_calls 却没有正文时，content 要给 null 而不是空字符串。
+   *
+   * <p>部分服务端要求「带工具调用的那条消息，content 要么有内容要么是 null」，
+   * 空字符串会被判成格式错误（400）。
+   */
+  String said=response.optString("text","");
+  JSONObject msg=new JSONObject().put("role","assistant").put("tool_calls",toolCalls);
+  if(!said.trim().isEmpty())msg.put("content",said);else msg.put("content",JSONObject.NULL);
+  return msg;
  }
 
  /**
@@ -1168,7 +1210,7 @@ final class DevAgent {
        */
       result.put("error","你这次的参数被截断了，系统只补上了收尾的括号，"
        +"但正文内容没有补回来（你发出的原文在："
-       +call.optString("argsError","")
+       +call.optString("argsRaw",call.optString("argsError",""))
        +"）。"
        +"如果这是写文件类工具（write_files / patch_file / multi_patch），"
        +"继续执行会把只有一半的文件写进项目 —— 所以这次没有执行。"
@@ -1183,8 +1225,11 @@ final class DevAgent {
       }
       /* 补全过的参数要告诉模型一声，它才知道自己上次写坏了。 */
       if(call.optBoolean("argsRepaired",false))
-       result.put("note","你上次的参数被截断了，系统自动补全括号后执行成功。"
-        +"不过内容可能仍然不完整，请检查结果对不对；下次控制单次输出长度，大文件分几次写。");
+       result.put("note","你这次的参数被截断了，系统自动补全括号后执行成功，"
+        +"但补回来的只是收尾，你发来的原文是：「"
+        +call.optString("argsRaw","")
+        +"」。请核对结果对不对；如果读到的内容明显少了段落，"
+        +"请重新用完整的参数读一次。下次控制单次输出长度，大文件分几次写。");
      }
      results.put(result);
      trail.put(result);

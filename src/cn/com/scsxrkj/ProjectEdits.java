@@ -143,7 +143,18 @@ final class ProjectEdits {
     String n=dit.next();
     if(base.has(n))delta.put(n,base.optString(n,""));
     // 当时没有这个文件（这次是新建的）→ 用 NULL 标记，恢复时要删掉
-    else delta.put(n,JSONObject.NULL);
+    else{
+     delta.put(n,JSONObject.NULL);
+     /*
+      * 同时记进「新增名单」。
+      *
+      * <p>NULL 标记已经能让恢复时删掉这个文件，
+      * 但新增名单是差量存档里另一条独立的语义通道 ——
+      * 前端算变更、ProjectDiff 算差异时都读它。
+      * 两条通道都写，恢复路径才不会因为某一条漏读而留下新建的文件。
+      */
+     added.put(n);
+    }
    }
    JSONArray mine=new JSONArray();
    mine.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("added",added).put("delta",true).put("source","auto"));

@@ -557,6 +557,22 @@ final class SelfTest {
    for(int i=trimmedMem.indexOf(AiMemory.CUT_MARK);i>=0;i=trimmedMem.indexOf(AiMemory.CUT_MARK,i+1))markCount++;
    check(trimmedMem.contains(AiMemory.CUT_MARK)&&markCount==1,"memory trims to cap with a single cut marker");
    check(trimmedMem.length()<=AiMemory.GLOBAL_CAP+AiMemory.CUT_MARK.length()+8,"memory stays within cap after trimming");
+   /*
+    * 裁剪后留下的每一行都必须是完整的条目。
+    *
+    * <p>原来是从字符位置硬切，裁完第一行往往只剩半句话 ——
+    * 模型读到「……因为编译期检查不通过」，会当成完整事实。
+    */
+   boolean allWholeLines=true;
+   String[] tmLines=trimmedMem.split("\n");
+   for(int i=0;i<tmLines.length;i++){
+    String ln=tmLines[i].trim();
+    if(ln.isEmpty())continue;
+    if(ln.startsWith(AiMemory.CUT_MARK))continue;
+    // 每条记忆都是 "- [MM-dd HH:mm] " 开头的完整行
+    if(!ln.startsWith("- ["))allWholeLines=false;
+   }
+   check(allWholeLines,"every kept memory line is a whole entry, not a half sentence");
   }finally{
    mem.replace(savedGlobal,"global",null);
   }
@@ -1235,6 +1251,31 @@ final class SelfTest {
     "environment hints are listed separately from fatal ones");
    check(viteCheck.optJSONArray("fatalWarnings")!=null&&viteCheck.optJSONArray("fatalWarnings").length()==0,
     "an environment hint is not counted as fatal");
+   /*
+    * 编译缓存：文件没变就不该再编译一遍。
+    *
+    * <p>模型在工具循环里经常连着调 check_project。
+    * 每次都重跑一次 esbuild（WebView + WASM 初始化，几秒到几十秒），
+    * 用户那边看起来就是「AI 卡住不动」。
+    *
+    * <p>反过来，文件改了一个字节就必须重新编译 ——
+    * 拿旧结论糊弄模型，比慢得多可怕。
+    */
+   JSONObject cacheProject=new JSONObject().put("id","qa-cache")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body><h1>cache</h1></body></html>"));
+   JSONObject cacheFirst=LocalCompiler.check(a,cacheProject);
+   check(!cacheFirst.optBoolean("cached",false),"the first compile is not served from the cache");
+   JSONObject cacheSecond=LocalCompiler.check(a,cacheProject);
+   check(cacheSecond.optBoolean("cached",false),"an unchanged project is served from the cache");
+   /*
+    * 改一个字就必须重新编译。
+    */
+   JSONObject changedFiles=new JSONObject(cacheProject.getJSONObject("files").toString())
+    .put("index.html","<!doctype html><html><body><h1>cache changed</h1></body></html>");
+   JSONObject cacheChanged=LocalCompiler.check(a,new JSONObject().put("id","qa-cache").put("files",changedFiles));
+   check(!cacheChanged.optBoolean("cached",false),"a changed project is compiled again");
+   check(cacheSecond.optBoolean("ok")==cacheFirst.optBoolean("ok"),
+    "the cached result keeps the same verdict");
    /* Anthropic 形态也要能分组 */
    JSONArray anthHistory=new JSONArray();
    anthHistory.put(new JSONObject().put("role","user").put("content","原始任务"));

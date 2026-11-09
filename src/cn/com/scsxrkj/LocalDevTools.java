@@ -1,5 +1,6 @@
 package cn.com.scsxrkj;
 import org.json.*;
+import java.util.Map;
 import java.util.*;
 import java.util.concurrent.*;
 /**
@@ -368,8 +369,23 @@ static String instructions(boolean project,boolean nativeTools){
   * <p>为什么不靠参数判断「重复」：改完文件之后再读同一个文件，
   * 参数一样但结果变了，那是正常行为。按结果判断才不会误伤。
   */
- private final java.util.HashMap<String,String> lastResult=new java.util.HashMap<>();
- private final java.util.HashMap<String,Integer> sameCount=new java.util.HashMap<>();
+ /*
+  * 记住上一次只读工具的调用参数和结果，用来识别「一模一样的空转调用」。
+  *
+  * <p><b>这两个表必须有上限。</b>参数里可能带着整份文件列表、很长的搜索词，
+  * 每一次不同的调用都会往表里塞一条，几千轮之后能撑到几十兆 ——
+  * 手机上直接 OOM，而这正是当初要治的毛病。
+  *
+  * <p>超出上限就丢掉最老的一条（{@link java.util.LinkedHashMap} 的插入序正好当队列用）。
+  */
+ private final java.util.LinkedHashMap<String,String> lastResult=new java.util.LinkedHashMap<String,String>(64,0.75f,true){
+  protected boolean removeEldestEntry(Map.Entry<String,String> eldest){return size()>REPEAT_CACHE_CAP;}
+ };
+ private final java.util.LinkedHashMap<String,Integer> sameCount=new java.util.LinkedHashMap<String,Integer>(64,0.75f,true){
+  protected boolean removeEldestEntry(Map.Entry<String,Integer> eldest){return size()>REPEAT_CACHE_CAP;}
+ };
+ /** 重复调用识别表最多留多少条。够用就行 —— 真正会被反复调用的工具本来就那么几个。 */
+ static final int REPEAT_CACHE_CAP=200;
 
  /** 只读工具才做这个判断：写工具的重复调用可能有真实意图。 */
  static boolean isReadOnly(String n){
@@ -532,7 +548,7 @@ JSONObject call(String name,JSONObject args)throws Exception{
     }
     break;
    }
-   case "replace_text":String editPath=args.getString("path"),oldText=args.getString("oldText"),newText=args.getString("newText");
+   case "replace_text":String editPath=args.optString("path",""),oldText=args.optString("oldText","");
     /*
      * 用当前暂存区的文件。
      *
@@ -541,7 +557,22 @@ JSONObject call(String name,JSONObject args)throws Exception{
      * 不至于报「文件已变化，本轮建议未写入」。
      */
     JSONObject curFiles=staged.getJSONObject("files");
-    if(!curFiles.has(editPath)||oldText.isEmpty())throw new Exception("无效的精确替换参数");
+    /*
+     * 分开报错。
+     *
+     * <p>原来合成一句「无效的精确替换参数」—— 模型看到这句话，
+     * 不知道是文件路径写错了、还是 oldText 没对上，于是换个写法再试，
+     * 于是又错。路径不存在时该直接列出项目里相近的文件名。
+     */
+    if(!curFiles.has(editPath)){
+     String hint=nearestFiles(curFiles,editPath);
+     throw new Exception("文件不存在："+editPath
+      +(hint.isEmpty()?"":"。项目里相近的文件有："+hint));
+    }
+    if(editPath.isEmpty())throw new Exception("缺少 path —— 要改哪个文件");
+    if(oldText.isEmpty())throw new Exception("oldText 不能为空 —— 要替换的原文片段");
+    String newText=args.optString("newText",null);
+    if(newText==null)throw new Exception("缺少 newText —— 要替换成的新内容");
     String current=curFiles.getString(editPath);int at=current.indexOf(oldText);if(at<0||current.indexOf(oldText,at+1)>=0)throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");String replaced=current.substring(0,at)+newText+current.substring(at+oldText.length());staged=ProjectEdits.apply(staged,curFiles,new JSONObject().put(editPath,replaced),"AI 暂存");out.put("staged",true).put("path",editPath).put("replacements",1);break;
    case "patch_file":out.put("result",patchFile(staged.getJSONObject("files"),args));break;
    /*
@@ -573,7 +604,15 @@ JSONObject call(String name,JSONObject args)throws Exception{
      try{done.put(patchFile(staged.getJSONObject("files"),pc));}
      catch(Exception e){failed.put(new JSONObject().put("path",pc.optString("path","")).put("error",e.getMessage()==null?"失败":e.getMessage()));}
     }
-    out.put("ok",done.length()).put("results",done).put("failed",failed);
+    /*
+     * ok 是「成功了几处」，不是「全成功」——
+     * 原来的写法只有 ok=成功数，模型很容易读成「都成功了」。
+     * 现在补一个 allOk 布尔，并且有失败时把失败清单摆在最前面。
+     */
+    boolean allOk=failed.length()==0;
+    out.put("ok",done.length()).put("allOk",allOk).put("results",done).put("failed",failed);
+    if(!allOk)out.put("note","共 "+done.length()+" 处成功、"+failed.length()+" 处失败。"
+     +"失败的那几处没有改动，请看 failed 数组里的原因；成功的那些已经生效。");
     break;
    }
    /*
@@ -597,7 +636,27 @@ JSONObject call(String name,JSONObject args)throws Exception{
     }
     break;
    }
-   case "write_files":staged=ProjectEdits.apply(staged,staged.getJSONObject("files"),args.getJSONObject("files"),"AI 暂存");out.put("staged",true).put("message","暂存文件已校验，最终成功后写回项目");break;
+   case "write_files":{
+    /*
+     * files 有时会被模型写成字符串（把整个对象序列化进了字符串里）。
+     *
+     * <p>直接 getJSONObject 会抛 org.json 的原始异常，
+     * 模型看到的是「JSONObject["files"] not a string」这种底层报错 ——
+     * 它不知道该改什么，往往就把同样的东西再发一遍。
+     *
+     * <p>所以这里先把字符串解出来，解不出才报错，并且说清楚两种正确写法。
+     */
+    JSONObject wfFiles=args.optJSONObject("files");
+    if(wfFiles==null){
+     String rawFiles=args.optString("files","");
+     if(rawFiles.trim().isEmpty())throw new Exception("write_files 需要 files 对象，形如 {\"文件路径\":\"完整内容\"}");
+     try{wfFiles=new JSONObject(rawFiles);}
+     catch(Exception e){throw new Exception("files 不是对象。请写成 {路径:内容} 这样的对象，"
+      +"不要把整个对象再包成字符串。你发来的原文开头是："+rawFiles.substring(0,Math.min(120,rawFiles.length())));}
+    }
+    staged=ProjectEdits.apply(staged,staged.getJSONObject("files"),wfFiles,"AI 暂存");
+    out.put("staged",true).put("message","暂存文件已校验，最终成功后写回项目");
+    break;}
    case "check_project":return LocalCompiler.check(a,staged);
    case "run_preview":CountDownLatch opened=new CountDownLatch(1);String[] failure={null};a.runOnUiThread(()->{try{if(a.localRunner!=null&&a.localRunner.dialog!=null)a.localRunner.dialog.dismiss();a.localRunner=new LocalRunner(a,staged);a.localRunner.start();}catch(Exception e){failure[0]=e.getMessage();}finally{opened.countDown();}});if(!opened.await(10,TimeUnit.SECONDS))throw new Exception("预览打开超时");if(failure[0]!=null)throw new Exception(failure[0]);out.put("opened",true).put("message","已打开离线预览，编译/运行日志可用get_debug_reports读取；打开不代表交互验收通过");break;
    case "get_debug_reports":synchronized(a){out.put("reports",a.byId("projects",staged.getString("id")).optJSONArray("debugReports"));}if(a.localRunner!=null&&a.localRunner.projectId.equals(staged.getString("id")))out.put("preview",a.localRunner.report());break;
@@ -642,6 +701,52 @@ JSONObject call(String name,JSONObject args)throws Exception{
      +"。请从上面这些名字里选一个，参数名要照工具说明里的写。");
   }return out;
  }
+ /**
+  * 找出项目里和给定路径最接近的几个文件名。
+  *
+  * <p>模型写路径时经常差一个目录、少一个后缀、把斜杠写成反斜杠。
+  * 只说「文件不存在」它只能瞎猜；把相近的几个列出来，它一眼就能对上。
+  *
+  * @param files 项目的文件表
+  * @param want  模型给的路径
+  * @return 逗号分隔的候选路径（最多 5 个，没有则空串）
+  */
+ private static String nearestFiles(JSONObject files,String want){
+  if(files==null||want==null)return "";
+  String w=want.toLowerCase(java.util.Locale.ROOT);
+  // 打分：完全相同的文件名算最高，其次是包含关系，再次是共用后缀
+  java.util.List<String> names=new java.util.ArrayList<>();
+  java.util.Iterator<String> it=files.keys();
+  while(it.hasNext())names.add(it.next());
+  // 用「分数 + 路径」一起存，排序时按分数从高到低
+  java.util.List<String> hits=new java.util.ArrayList<>();
+  java.util.Map<String,Integer> scores=new java.util.LinkedHashMap<>();
+  for(String n:names){
+   String ln=n.toLowerCase(java.util.Locale.ROOT);
+   String base=ln.substring(ln.lastIndexOf('/')+1);
+   String wbase=w.substring(w.lastIndexOf('/')+1);
+   int score=-1;
+   if(ln.equals(w))score=100;
+   else if(base.equals(wbase))score=80;
+   else if(ln.endsWith(w)||w.endsWith(ln))score=60;
+   else if(base.contains(wbase)||wbase.contains(base))score=40;
+   else if(ln.contains(w)||w.contains(ln))score=20;
+   if(score>=0){hits.add(n);scores.put(n,score);}
+  }
+  if(hits.isEmpty())return "";
+  // 分数高的排前面；同分保持文件表里的原顺序
+  // 用 Collections.sort 而不是 List.sort —— 后者要 API 24 以上才稳
+  java.util.Collections.sort(hits,new java.util.Comparator<String>(){
+   public int compare(String a,String b){return scores.get(b)-scores.get(a);}
+  });
+  StringBuilder sb=new StringBuilder();
+  for(int i=0;i<hits.size()&&i<5;i++){
+   if(i>0)sb.append("、");
+   sb.append(hits.get(i));
+  }
+  return sb.toString();
+ }
+
  /**
   * 列出项目文件。
   *
@@ -897,8 +1002,12 @@ JSONObject call(String name,JSONObject args)throws Exception{
   * @return 结果描述
   */
  private JSONObject patchFile(JSONObject files,JSONObject args)throws Exception{
-  String path=args.getString("path");
-  if(!files.has(path))throw new Exception("文件不存在："+path);
+  String path=args.optString("path","");
+  if(path.isEmpty())throw new Exception("缺少 path —— 要改哪个文件");
+  if(!files.has(path)){
+   String hint=nearestFiles(files,path);
+   throw new Exception("文件不存在："+path+(hint.isEmpty()?"":"。项目里相近的文件有："+hint));
+  }
   String newContent=args.optString("newContent","");
   String original2=files.getString(path);
 

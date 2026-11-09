@@ -207,7 +207,26 @@ final class WebTools {
      continue;
     }
 
-    if(code<200||code>=400)throw new Exception("HTTP "+code+" "+c.getResponseMessage());
+    if(code<200||code>=400){
+     /*
+      * 出错时把响应体贴上去。
+      *
+      * <p>只说「HTTP 403」模型什么也做不了 —— 但很多站点的正文写着
+      * 到底哪里不行（需要登录、UA 被拦、频率超了、要带 Referer），
+      * 模型看到这段就能换个办法重试。
+      */
+     String detail="";
+     try(InputStream errIn=c.getErrorStream()){
+      if(errIn!=null){
+       byte[] eb=readCapped(errIn,4096);
+       String et=new String(eb,charsetOf(c.getContentType(),new String(eb,0,Math.min(2048,eb.length),StandardCharsets.ISO_8859_1)));
+       String plain=c.getContentType()!=null&&c.getContentType().toLowerCase(java.util.Locale.ROOT).contains("html")?htmlToText(et):et;
+       detail=plain.trim();
+       if(detail.length()>500)detail=detail.substring(0,500);
+      }
+     }catch(Exception ignored){}
+     throw new Exception("HTTP "+code+" "+c.getResponseMessage()+(detail.isEmpty()?"":"："+detail));
+    }
     String contentType=c.getContentType();
     byte[] bytes;
     try(InputStream in=c.getInputStream()){bytes=readCapped(in,RAW_CAP);}
@@ -260,6 +279,8 @@ final class WebTools {
     out.put(new JSONObject().put("title",o1.optString("title")).put("url",o1.optString("url"))
      .put("snippet",trim(o1.optString("content"),600)));
    }
+   if(out.length()==0)out.put(new JSONObject().put("title","没有找到结果").put("url","").put("snippet",
+    "这次搜索没有返回任何条目。换一种说法或用更具体的关键词再搜一次。"));
    return new JSONObject().put("query",q).put("provider",prov).put("results",out);
   }
 
@@ -277,6 +298,8 @@ final class WebTools {
    JSONObject answer=r.optJSONObject("answerBox");
    JSONObject extra=new JSONObject();
    if(answer!=null)extra.put("answerBox",new JSONObject().put("title",answer.optString("title")).put("answer",trim(answer.optString("answer"),800)));
+   if(out.length()==0)out.put(new JSONObject().put("title","没有找到结果").put("url","").put("snippet",
+    "这次搜索没有返回任何条目。换一种说法或用更具体的关键词再搜一次。"));
    return new JSONObject().put("query",q).put("provider",prov).put("results",out).put("extra",extra);
   }
 
@@ -305,7 +328,19 @@ final class WebTools {
    InputStream in=code>=400?c.getErrorStream():c.getInputStream();
    String text=in==null?"":new String(readCapped(in,RAW_CAP),StandardCharsets.UTF_8);
    if(code<200||code>=400)throw new Exception("搜索服务返回 HTTP "+code+"："+trim(text,300));
-   return new JSONObject(text);
+   /*
+    * 200 但内容不是 JSON。
+    *
+    * <p>这种情况不罕见：网关拦截页、企业网络的登录跳转、限流中间层，
+    * 全都返回 200 加一段 HTML。直接 new JSONObject(text) 会抛
+    * org.json 的原始异常（"Value of type ... cannot be converted"），
+    * 模型看到完全不知道发生了什么。
+    */
+   try{
+    return new JSONObject(text);
+   }catch(Exception e){
+    throw new Exception("搜索服务返回的内容不是 JSON（可能被网关拦截或限流）："+trim(text,300));
+   }
   }finally{c.disconnect();}
  }
 }

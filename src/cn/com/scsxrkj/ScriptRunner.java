@@ -267,6 +267,8 @@ final class ScriptRunner {
      pollExpr="JSON.stringify("+prop+"||null)";
     }
     final boolean[] injected={false};final int[] polls={0};
+    /* 解析失败次数。连续解析不出来说明是结果格式的问题，不是超时。 */
+    final int[] parseFailures={0};
     Runnable poll=new Runnable(){
      public void run(){
       if(done.getCount()==0)return;
@@ -296,10 +298,28 @@ final class ScriptRunner {
          +" isString="+(decoded instanceof String)+(decoded instanceof String?(" len="+((String)decoded).length()):""));
         if(decoded instanceof String&&!decoded.equals("null")){
          JSONObject got=extractor.convert((String)decoded);
+         /*
+          * 返回 null 的意思是「还没好，继续轮询」——
+          * 这不是错误，不能就此报错。
+          */
          if(got!=null){result[0]=got;done.countDown();return;}
         }
        }catch(Exception e){
-        // 这里吞异常会让「结果解析失败」表现成「超时」，必须留下痕迹
+        /*
+         * 这里吞异常会让「结果解析失败」表现成「超时」。
+         *
+         * <p>超时说的是「代码可能陷入了死循环」—— 而实际情况是脚本报错了。
+         * 模型看到这句会以为自己的代码有死循环，去改逻辑；用户看到的是
+         * 「AI 跑了 45 秒说死循环」，其实只是少了个括号。
+         *
+         * <p>所以解析失败要立刻报出去，并且把原始内容带上。
+         */
+        parseFailures[0]++;
+        if(parseFailures[0]==1){
+         failure[0]="结果解析失败："+e.getMessage()+"。原始内容（前 500 字符）："+trimForMessage(raw==null?"":raw);
+         done.countDown();
+         return;
+        }
         if(a.debug)android.util.Log.i("NeoSandbox","poll parse failed: "+e+" raw="+(raw==null?"null":raw));
        }
        handler.postDelayed(self,300);
@@ -322,6 +342,17 @@ final class ScriptRunner {
    done.countDown();
    a.runOnUiThread(()->{if(view[0]!=null){view[0].stopLoading();view[0].destroy();}});
   }
+ }
+
+ /**
+  * 把一段内容截短，给错误消息用。
+  *
+  * <p>错误消息要塞进对话里，太长会把上下文撑爆，也没人看得下去。
+  */
+ private static String trimForMessage(String s){
+  if(s==null)return "";
+  String t=s.trim();
+  return t.length()>500?t.substring(0,500)+"…":t;
  }
 
  /** 把轮询到的原始 JSON 字符串转成结果对象；返回 null 表示"还没好，继续等"。 */

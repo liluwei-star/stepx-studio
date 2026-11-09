@@ -130,7 +130,23 @@ final class StreamResponse {
    JSONObject one=new JSONObject().put("id",slot[1]==null||slot[1].isEmpty()?("call_"+i):slot[1])
     .put("name",name).put("args",args);
    if(argsError!=null)one.put("argsError",argsError.length()>800?argsError.substring(0,800)+"…":argsError);
-   if(argsRepaired)one.put("argsRepaired",true);
+   if(argsRepaired){
+    /*
+     * 补全过的参数单独留一份原文（argsRaw），不能塞进 argsError。
+     *
+     * <p>两者语义不同：
+     * <ul>
+     * <li>argsError = 参数<b>彻底解析不了</b>，工具不执行，模型必须重发。</li>
+     * <li>argsRaw  = 参数被截断但<b>补全后能解析</b>，工具照常执行，
+     *     只是要告诉模型「你发的那段不完整，我替你补了收尾」。</li>
+     * </ul>
+     * 混用会导致只读工具被无故拒绝执行 ——
+     * 模型读一半的文件是有价值的，拒掉它反而更差。
+     */
+    one.put("argsRepaired",true);
+    String raw=slot[2]==null?"":slot[2];
+    one.put("argsRaw",raw.length()>800?raw.substring(0,800)+"…":raw);
+   }
    out.put(one);
    i++;
   }

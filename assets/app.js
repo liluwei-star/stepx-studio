@@ -1118,7 +1118,31 @@ function aiProjectCard(){return `<div class="card ai-target"><div class="ai-targ
  * 代码块、工具记录、推理、GitHub 参考这些「过程」才折叠。
  * 用户想看细节可以点开，但第一眼就能读到结论。
  */
+/**
+ * 找出一个 JSON 对象真正的结束位置。
+ *
+ * <p>用括号配对数，字符串里的括号和转义引号不算。
+ * 找不到配对就返回 -1。
+ */
+
 function aiMessageBody(m){
+  function jsonObjectEnd(s,start){
+  if(s[start]!=='{')return -1;
+  let depth=0,inStr=false,esc=false;
+  for(let i=start;i<s.length;i++){
+    const ch=s[i];
+    if(inStr){
+      if(esc){esc=false;continue;}
+      if(ch==='\\'){esc=true;continue;}
+      if(ch==='"')inStr=false;
+      continue;
+    }
+    if(ch==='"'){inStr=true;continue;}
+    if(ch==='{')depth++;
+    else if(ch==='}'){depth--;if(depth===0)return i+1;}
+  }
+  return -1;
+  }
   const raw=typeof m.content==='string'?m.content:JSON.stringify(m.content);
   /*
    * 正文里如果混着模型交回的 files JSON，把它剥掉。
@@ -1141,26 +1165,69 @@ function aiMessageBody(m){
   let body=raw;
   let parsed=null;
   let jsonStart=-1;
+  /* JSON 在正文里的起点和终点。终点用来保留 JSON 之后的那句人话。 */
+  let jsonEnd=-1;
   const fence=body.match(/```(?:json)?\s*\n([\s\S]*?)```/);
   if(fence){
     try{parsed=JSON.parse(fence[1]);}catch(e){parsed=null;}
-    if(parsed)jsonStart=body.indexOf(fence[1]);
+    if(parsed){jsonStart=body.indexOf(fence[1]);jsonEnd=jsonStart+fence[1].length;}
   }else{
+    /*
+     * 裸 JSON 的情况：靠括号配对找出它真正的结尾。
+     *
+     * <p>不能直接 JSON.parse(body.slice(from)) —— 那是「从第一个 { 一直到末尾」。
+     * 两个后果：
+     * <ol>
+     *   <li>JSON 后面还有一句人话（「还需要我做别的吗？」）→ 整段解析失败，
+     *       JSON 就这么裸露给用户看；</li>
+     *   <li>回答里先出现一个左花括号（比如贴了段代码 function f(){）→ from 指错了地方，
+     *       同样解析失败。</li>
+     * </ol>
+     * 所以先按括号配对（字符串里的括号不算）截出完整的那一段，再解析。
+     */
     const from=body.indexOf('{');
     if(from>=0){
-      try{parsed=JSON.parse(body.slice(from));}catch(e){parsed=null;}
-      if(parsed)jsonStart=from;
+      const to=jsonObjectEnd(body,from);
+      if(to>from){
+        try{parsed=JSON.parse(body.slice(from,to));}catch(e){parsed=null;}
+        if(parsed){jsonStart=from;jsonEnd=to;}
+      }
     }
   }
-  if(parsed&&parsed.files&&typeof parsed.files==='object'){
+  /*
+   * 只要模型给了一个协议对象（带 files 或带 summary），就把 JSON 剥掉。
+   *
+   * <p>原来只认 files。可纯问答时模型返回的是 {"summary":"..."}，
+   * 没有 files —— 于是 JSON 整段裸露给用户，看到的是
+   * {"summary":"这个函数的作用是..."}，而不是那句答案。
+   */
+  if(parsed&&(parsed.files||typeof parsed.summary==='string')){
     const summary=typeof parsed.summary==='string'?parsed.summary:'';
-    /* JSON 之前的人话（模型的直接回答）要留下 */
+    /*
+     * JSON 前后的人话都要留下。
+     *
+     * <p>模型经常是「先说答案 → 给 JSON → 再补一句」，
+     * 后半句同样是给用户看的，不能跟着 JSON 一起被丢掉。
+     */
     let prose=jsonStart>0?body.slice(0,jsonStart).trim():'';
+    /*
+     * 开头的代码围栏也在 prose 里（jsonStart 指的是 JSON 本身的位置，
+     * 围栏的 ```json 在它前面）—— 同样要剥掉，
+     * 否则用户看到正文第一行是孤零零的三个反引号。
+     */
+    prose=prose.replace(/```[A-Za-z0-9]*\s*$/,'').trim();
+    let after=jsonEnd>0?body.slice(jsonEnd).trim():'';
+    /*
+     * 代码围栏的收尾 ``` 也在 after 里，得去掉 ——
+     * 否则用户会看到一行孤零零的三个反引号。
+     */
+    after=after.replace(/^```[A-Za-z0-9]*\s*/,'').replace(/```\s*$/,'').trim();
     if(prose&&summary&&prose.indexOf(summary)<0)prose=prose+'\n';
     const parts=[];
     if(prose)parts.push(prose);
     if(summary)parts.push(summary);
-    if(!parts.length)parts.push('（本轮已按要求修改项目文件，模型没有给出文字说明）');
+    if(after)parts.push(after);
+    if(!parts.length)parts.push(parsed.files?'（本轮已按要求修改项目文件，模型没有给出文字说明）':'（模型没有给出文字说明）');
     body=parts.join('\n');
   }
   return `<div class="ai-text">${esc(body).replace(/\n/g,'<br>')}</div>`;

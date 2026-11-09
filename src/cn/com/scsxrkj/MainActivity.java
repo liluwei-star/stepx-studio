@@ -73,12 +73,15 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  final int BG=Color.rgb(28,28,30),INK=Color.rgb(237,237,240),ACCENT=Color.rgb(255,138,91);
  String appVersion="0.0.0";
  ConnectorCatalog connectors;LocalModels localModels;AiMemory memory;SkillStore skills;WebTools net;GitHubTool gh;ScriptRunner script;volatile JSONObject liveEdit;
+ /** 导入配置用的广播接收器。Activity 重建时要注销旧的，否则会累积并一直持有 Activity。 */
+ android.content.BroadcastReceiver importReceiver;
  @Override public void onCreate(Bundle saved){super.onCreate(saved);
   // 接收「导入模型配置」的广播。配置内容放在应用私有目录的 pending_profiles.json。
   try{
-   registerReceiver(new android.content.BroadcastReceiver(){
+   importReceiver=new android.content.BroadcastReceiver(){
     @Override public void onReceive(android.content.Context ctx,Intent i){onImportRequest();}
-   },new android.content.IntentFilter("cn.com.scsxrkj.IMPORT_PROFILES"));
+   };
+   registerReceiver(importReceiver,new android.content.IntentFilter("cn.com.scsxrkj.IMPORT_PROFILES"));
   }catch(Exception ignored){}
   instance=this;debug=(getApplicationInfo().flags&ApplicationInfo.FLAG_DEBUGGABLE)!=0;try{appVersion=getPackageManager().getPackageInfo(getPackageName(),0).versionName;}catch(Exception ignored){}vault=new Vault(this);prefs=getSharedPreferences("ui",0);desktop=prefs.getBoolean("desktop",false);zoom=prefs.getInt("zoom",100);loadState();localModels=new LocalModels(this);connectors=new ConnectorCatalog(this);art=new ArtManager(this);
   // ── 系统栏（状态栏 / 导航栏）初始化 ──
@@ -3543,5 +3546,14 @@ if(info==null||info.packageName==null||!info.packageName.equals(b.getString("pac
  /** 退到后台：停止自动联动、暂停网页、把 Cookie 刷到磁盘。 */
  @Override public void onPause(){if(updater!=null)updater.foreground=false;if(link!=null&&link.running)link.stop("应用进入后台，已停止后续自动步骤");if(studio!=null)studio.onPause();CookieManager.getInstance().flush();super.onPause();}
  /** 销毁：关掉所有对话框、取消进行中的请求、断开 JS 桥、释放 WebView。 */
- @Override public void onDestroy(){if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();if(cloud!=null)cloud.destroy();if(updater!=null)updater.destroy();if(chooser!=null)chooser.onReceiveValue(null);if(webPermission!=null)webPermission.deny();if(active!=null)active.cancel();worker.shutdown();if(desk!=null){desk.removeJavascriptInterface("Neo");desk.destroy();}if(studio!=null)studio.destroy();if(instance==this)instance=null;super.onDestroy();}
+ @Override public void onDestroy(){
+ /*
+  * 注销广播接收器。
+  *
+  * <p>不注销的话，每次 Activity 重建（主题切换、配置变更）都会再注册一个 ——
+  * 旧的那个还持有 Activity 的引用，内存泄漏，而且同一个广播会被处理多次：
+  * 「导入模型配置」弹好几次窗。
+  */
+  try{if(importReceiver!=null){unregisterReceiver(importReceiver);importReceiver=null;}}catch(Exception ignored){}
+  if(localRunner!=null&&localRunner.dialog!=null)localRunner.dialog.dismiss();if(cloud!=null)cloud.destroy();if(updater!=null)updater.destroy();if(chooser!=null)chooser.onReceiveValue(null);if(webPermission!=null)webPermission.deny();if(active!=null)active.cancel();worker.shutdown();if(desk!=null){desk.removeJavascriptInterface("Neo");desk.destroy();}if(studio!=null)studio.destroy();if(instance==this)instance=null;super.onDestroy();}
 }

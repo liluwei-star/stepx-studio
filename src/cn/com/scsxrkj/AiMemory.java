@@ -94,11 +94,61 @@ final class AiMemory {
   String text=readText(fileOf(scope,projectId));
   int cap=capOf(scope,projectId);
   if(text.length()<=cap)return text;
-  String trimmed=text.substring(text.length()-cap);
-  int nl=trimmed.indexOf('\n');
-  if(nl>=0&&nl<trimmed.length()-1)trimmed=trimmed.substring(nl+1);
-  if(trimmed.startsWith(CUT_MARK))trimmed=trimmed.substring(CUT_MARK.length()).trim();
-  return CUT_MARK+"\n"+trimmed;
+  return CUT_MARK+"\n"+trimToLines(text,cap);
+ }
+
+ /**
+  * 按整行裁剪，保留末尾的内容。
+  *
+  * <p><b>为什么必须按行裁，不能硬切：</b>硬切会在开头留下半句话 ——
+  * 模型读到的是「……因为编译期检查不通过」，它会以为这件事本来就是这样，
+  * 从而按一个残缺的因果关系去做判断。
+  *
+  * <p>所以从末尾往回找完整的行边界，凑够预算就停。
+  *
+  * @param text 原文
+  * @param cap  最多保留多少字符
+  * @return 裁剪后的内容（一定以完整行结尾）
+  */
+ static String trimToLines(String text,int cap){
+  if(cap<=0)return "";
+  if(text.length()<=cap)return text;
+  /*
+   * 拆成整行，再从末尾往前一行行地收，直到收满预算。
+   *
+   * <p>拆行而不是找换行符的位置：找位置很容易写出死循环
+   * （位置没退回去就永远转），拆行没有这个坑。
+   */
+  String[] lines=text.split("\n",-1);
+  // 用列表收集，最后一次性拼 —— 逐次 insert(0,...) 是 O(n²)，条目多了会卡
+  java.util.ArrayList<String> kept=new java.util.ArrayList<>();
+  int usedChars=0;
+  for(int i=lines.length-1;i>=0;i--){
+   String line=lines[i];
+   if(line.isEmpty())continue;
+   int cost=line.length()+(kept.isEmpty()?0:1);
+   if(usedChars+cost>cap)break;
+   kept.add(line);
+   usedChars+=cost;
+  }
+  java.util.Collections.reverse(kept);
+  // 不用 String.join —— 它要 API 26，而本应用最低支持 API 24
+  StringBuilder sb=new StringBuilder();
+  for(int i=0;i<kept.size();i++){
+   if(i>0)sb.append('\n');
+   sb.append(kept.get(i));
+  }
+  String out=sb.toString().trim();
+  /*
+   * 一行都收不下（单行就超预算）时，至少保住最后一行 ——
+   * 宁可超一点，也不能留半句话。
+   */
+  if(out.isEmpty()){
+   for(int i=lines.length-1;i>=0;i--){
+    if(!lines[i].isEmpty())return lines[i].trim();
+   }
+  }
+  return out;
  }
 
  /** 记忆当前占用的字符数，用于给前端显示进度。 */
@@ -130,16 +180,16 @@ final class AiMemory {
   int cap=capOf(scope,projectId);
   boolean trimmed=false;
   if(next.length()>cap){
-   String keep=next.substring(next.length()-cap);
-   int nl=keep.indexOf('\n');
-   if(nl>=0&&nl<keep.length()-1)keep=keep.substring(nl+1);
    /*
     * 裁剪前先把上一次留下的标记去掉。
     * 不去的话每 remember 一次就加一层「已自动裁剪」，
     * 记忆满了之后这个前缀会越堆越高，把真正的预算吃掉。
     */
-   if(keep.startsWith(CUT_MARK))keep=keep.substring(CUT_MARK.length()).trim();
-   next=CUT_MARK+"\n"+keep;
+   String keep=next;
+   while(keep.startsWith(CUT_MARK)){
+    keep=keep.substring(CUT_MARK.length()).trim();
+   }
+   next=CUT_MARK+"\n"+trimToLines(keep,cap-CUT_MARK.length()-1);
    trimmed=true;
   }
   writeText(f,next);
