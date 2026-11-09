@@ -20,6 +20,8 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8').replace(/\r\n/g, '\n');
+/* 工具源码只读一次，后面几段都要用（放太晚会被 TDZ 拦住） */
+const tools = read('src/cn/com/scsxrkj/LocalDevTools.java');
 
 let pass = 0, fail = 0;
 function ok(name, cond, detail) {
@@ -45,21 +47,31 @@ function grabMethod(java, signature) {
 
 function loadStripper() {
   const java = read('src/cn/com/scsxrkj/LocalDevTools.java');
-  const body = grabMethod(java, 'static String stripLineNumbers(String content){')
+  /* 正则和两个换行辅助也是被测逻辑的一部分，一起搬过来 */
+  const line = java.split('\n').find(l => l.includes('static final java.util.regex.Pattern STRIP_LINE='));
+  if (!line) throw new Error('STRIP_LINE not found');
+  const body = line + '\n'
+    + grabMethod(java, 'static String[] splitKeepCr(String content){')
+    + '\n' + grabMethod(java, 'static String withoutCr(String line){')
+    + '\n' + grabMethod(java, 'static String stripLineNumbers(String content){')
     + '\n' + grabMethod(java, 'static String stripSnippetLineNumbers(String content){')
     + '\n' + grabMethod(java, 'static String stripSnippetLineNumbers(String content,int hintStart){');
   const dir = path.join(ROOT, 'tests', '.tmp-strip');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'Strip.java'),
     'public class Strip{\n' + body + '\n' +
+    /*
+     * 必须原样读字节，不能用 readLine()。
+     *
+     * readLine() 会把行尾的 \r 一起吃掉 —— 于是「CRLF 文件也要能剥号」
+     * 这条根本测不出来：喂进去的是 CRLF，方法看到的是 LF，永远是绿的。
+     * 这正是那种「测试通过、真机翻车」的写法。
+     */
     ' public static void main(String[] a)throws Exception{' +
-    ' java.io.BufferedReader r=new java.io.BufferedReader(new java.io.InputStreamReader(System.in,"UTF-8"));' +
-    ' StringBuilder sb=new StringBuilder();String l;' +
-    ' while((l=r.readLine())!=null){if(sb.length()>0)sb.append("\\n");sb.append(l);}' +
+    ' String in=new String(System.in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);' +
     ' String mode=a.length>0?a[0]:"whole";' +
     ' int hint=a.length>1?Integer.parseInt(a[1]):0;' +
-    ' if(mode.equals("snippet"))System.out.print(stripSnippetLineNumbers(sb.toString(),hint));' +
-    ' else System.out.print(stripLineNumbers(sb.toString()));' +
+    ' System.out.print(mode.equals("snippet")?stripSnippetLineNumbers(in,hint):stripLineNumbers(in));' +
     '}}');
   // javac/java 不在 PATH 里（测试在 git-bash 下跑，SDK 里的 JDK 是绝对路径）
   const jdkHome = process.env.JAVA_HOME || 'C:/Users/llw/tools/jdk/jdk-21.0.2';
@@ -132,6 +144,31 @@ ok('带前导零的行号也算行号（01 就是第 1 行）',
 const mixed = '1: a\nrandom line';
 ok('混入非行号行时不剥', strip(mixed) === mixed);
 
+console.log('\n── CRLF 文件（Windows 导入 / 云端同步 / ZIP 解压）──');
+/*
+ * (.*)$ 里的 . 不匹配 \r，而 matches() 要求整串吃完 ——
+ * 于是「12: code\r」永远匹配不上：行号剥离对 CRLF 文件整个失效，
+ * 号照样被写进文件，偏偏这类文件多在 Windows 上编辑，看着还挺正常。
+ */
+const crlf = '1: a\r\n2: b\r\n3: c\r\n';
+ok('CRLF 的整份内容也能剥',
+  strip(crlf) === 'a\r\nb\r\nc\r\n', JSON.stringify(strip(crlf)));
+ok('CRLF 的片段也能剥',
+  strip.snippet('12: a\r\n13: b\r\n') === 'a\r\nb\r\n',
+  JSON.stringify(strip.snippet('12: a\r\n13: b\r\n')));
+ok('CRLF 的普通代码一个字节都不动',
+  strip('const a=1;\r\nconsole.log(a);\r\n') === 'const a=1;\r\nconsole.log(a);\r\n');
+/* 以换行结尾的内容剥完号不能平白多出一行 */
+ok('末尾有换行时不多出空行',
+  strip('1: a\n2: b\n') === 'a\nb\n', JSON.stringify(strip('1: a\n2: b\n')));
+ok('中间空行连 CRLF 一起保留',
+  strip('1: a\r\n2: \r\n3: b\r\n') === 'a\r\n\r\nb\r\n',
+  JSON.stringify(strip('1: a\r\n2: \r\n3: b\r\n')));
+/* patch 进 CRLF 文件的新内容，行尾也要是 CRLF，不能把文件弄成两种行尾 */
+ok('patch_file 会跟着文件的 CRLF 走',
+  /if\(crLines\*2>list\.size\(\)\)nc=nc\.replace\("\\n","\\r\\n"\);/.test(tools),
+  'CRLF 文件被 patch 之后会混进 LF 行');
+
 console.log('\n── 片段：行号不从 1 开始也要剥（patch_file 用）──');
 ok('中间几行的行号片段被剥',
   strip.snippet('12: a\n13: b\n14: c') === 'a\nb\nc',
@@ -149,7 +186,6 @@ ok('没有位置提示时单行一律不动',
   strip.snippet('7: hello') === '7: hello');
 
 console.log('\n── 写入路径已经接上 ────────────────────────────');
-const tools = read('src/cn/com/scsxrkj/LocalDevTools.java');
 ok('write_files 会剥行号', /wfFiles\.put\(n,clean\);stripped\.put\(n\);/.test(tools));
 ok('降级路径 finalChanges 也会剥',
   /changes\.put\(n,stripLineNumbers\(\(String\)v\)\)/.test(tools));

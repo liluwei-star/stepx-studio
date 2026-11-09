@@ -1216,6 +1216,17 @@ JSONObject call(String name,JSONObject args)throws Exception{
   // newContent 末尾的换行是格式噪音，去掉，否则会多出空行
   String nc=newContent;
   while(nc.endsWith("\n"))nc=nc.substring(0,nc.length()-1);
+  /*
+   * 文件是 CRLF 的话，新内容的换行也换成 CRLF。
+   *
+   * <p>拼接时行与行之间只补 \n；文件原有的行自己带着 \r，所以整体仍是 CRLF。
+   * 但新写进去的那几行是模型给的，只有 \n —— 不换的话，
+   * 一个文件里就同时存在 CRLF 和 LF 两种行尾。
+   * 这在编辑器里看不出来，等到提交到 git、或者被别的工具解析时才开始闹。
+   */
+  int crLines=0;
+  for(String line:list)if(line.endsWith("\r"))crLines++;
+  if(crLines*2>list.size())nc=nc.replace("\n","\r\n");
 
   java.util.ArrayList<String> result=new java.util.ArrayList<>(list.subList(0,start-1));
   if(!nc.isEmpty())for(String s:nc.split("\\n",-1))result.add(s);
@@ -1393,6 +1404,29 @@ JSONObject call(String name,JSONObject args)throws Exception{
   return sb.toString();
  }
 
+ /** 行号前缀的正则。整份和片段共用一份，免得两处走偏。 */
+ static final java.util.regex.Pattern STRIP_LINE=java.util.regex.Pattern.compile("^(\\d+): (.*)$");
+
+ /**
+  * 按 {@code \n} 拆行，行尾的 {@code \r} 留在行里。
+  *
+  * <p><b>为什么不能直接 split 之后就用：</b>Windows 上导入的项目、
+  * 云端同步下来或 ZIP 解出来的文件常常是 CRLF。{@code (.*)$} 里的 {@code .}
+  * 不匹配 {@code \r}，而 {@code matches()} 要求整串吃完 ——
+  * 于是「12: code\r」永远匹配不上，行号剥离对 CRLF 文件<b>整个失效</b>，
+  * 号照样被写进文件，而且这类文件大多在 Windows 上编辑，看着还特别正常。
+  *
+  * <p>所以匹配前把行尾 {@code \r} 摘掉，写回时再补上，换行风格原样保留。
+  */
+ static String[] splitKeepCr(String content){
+  return content.split("\n",-1);
+ }
+
+ /** 摘掉行尾的 {@code \r}，用来做匹配。 */
+ static String withoutCr(String line){
+  return line.endsWith("\r")?line.substring(0,line.length()-1):line;
+ }
+
  /**
   * 去掉模型从 read_file 结果里带回来的行号前缀。
   *
@@ -1417,10 +1451,11 @@ JSONObject call(String name,JSONObject args)throws Exception{
   */
  static String stripLineNumbers(String content){
   if(content==null||content.isEmpty())return content;
-  String[] lines=content.split("\n",-1);
-  java.util.regex.Pattern p=java.util.regex.Pattern.compile("^(\\d+): (.*)$");
+  String[] lines=splitKeepCr(content);
+  java.util.regex.Pattern p=STRIP_LINE;
   int expect=1,checked=0;
-  for(String line:lines){
+  for(String raw:lines){
+   String line=withoutCr(raw);
    if(line.isEmpty())continue;
    java.util.regex.Matcher m=p.matcher(line);
    if(!m.matches())return content;
@@ -1429,17 +1464,24 @@ JSONObject call(String name,JSONObject args)throws Exception{
   }
   /* 少于两行不值得判断，也可能只是内容里恰好有个「1: 」开头 */
   if(checked<2)return content;
+  /*
+   * 重建：只在行与行之间补 \n，不补在每行后面。
+   *
+   * <p>split(-1) 在「内容以换行结尾」时会多出一个空元素代表那个换行；
+   * 如果每行后面都补一个 \n，这个空元素就被补成了额外的空行 ——
+   * 一份 CRLF 文件剥完号会平白多出一行。
+   */
   StringBuilder sb=new StringBuilder();
   for(int i=0;i<lines.length;i++){
-   if(lines[i].isEmpty()){sb.append('\n');continue;}
-   java.util.regex.Matcher m=p.matcher(lines[i]);
-   if(m.matches())sb.append(m.group(2));
-   sb.append('\n');
+   String raw=lines[i],line=withoutCr(raw);
+   if(i>0)sb.append('\n');
+   if(!line.isEmpty()){
+    java.util.regex.Matcher m=p.matcher(line);
+    if(m.matches())sb.append(m.group(2));
+   }
+   if(raw.length()>line.length())sb.append('\r');
   }
-  String out=sb.toString();
-  /* 原内容末尾没有换行的话，这里补出来的要收回去 */
-  if(!content.endsWith("\n")&&out.endsWith("\n"))out=out.substring(0,out.length()-1);
-  return out;
+  return sb.toString();
  }
 
  /**
@@ -1473,10 +1515,11 @@ JSONObject call(String name,JSONObject args)throws Exception{
   */
  static String stripSnippetLineNumbers(String content,int hintStart){
   if(content==null||content.isEmpty())return content;
-  String[] lines=content.split("\n",-1);
-  java.util.regex.Pattern p=java.util.regex.Pattern.compile("^(\\d+): (.*)$");
+  String[] lines=splitKeepCr(content);
+  java.util.regex.Pattern p=STRIP_LINE;
   int expect=-1,checked=0,firstNo=-1;
-  for(String line:lines){
+  for(String raw:lines){
+   String line=withoutCr(raw);
    if(line.isEmpty())continue;
    java.util.regex.Matcher m=p.matcher(line);
    if(!m.matches())return content;
@@ -1488,15 +1531,16 @@ JSONObject call(String name,JSONObject args)throws Exception{
   /* 只有一行时，只能靠「行号正好等于这段的起始行」这个外部线索来判断 */
   if(checked<2&&!(checked==1&&hintStart>0&&firstNo==hintStart))return content;
   StringBuilder sb=new StringBuilder();
-  for(String line:lines){
-   if(line.isEmpty()){sb.append('\n');continue;}
-   java.util.regex.Matcher m=p.matcher(line);
-   if(m.matches())sb.append(m.group(2));
-   sb.append('\n');
+  for(int i=0;i<lines.length;i++){
+   String raw=lines[i],line=withoutCr(raw);
+   if(i>0)sb.append('\n');
+   if(!line.isEmpty()){
+    java.util.regex.Matcher m=p.matcher(line);
+    if(m.matches())sb.append(m.group(2));
+   }
+   if(raw.length()>line.length())sb.append('\r');
   }
-  String out=sb.toString();
-  if(!content.endsWith("\n")&&out.endsWith("\n"))out=out.substring(0,out.length()-1);
-  return out;
+  return sb.toString();
  }
 
  /** 记录一次「行号前缀被剥掉」的事，好在工具结果里告诉模型。 */
