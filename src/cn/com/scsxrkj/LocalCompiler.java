@@ -59,7 +59,18 @@ final class LocalCompiler {
   return Integer.toHexString(sb.toString().hashCode())+"-"+sb.length();
  }
  static JSONObject compile(MainActivity a,JSONObject project)throws Exception{
-  JSONObject snapshot=new JSONObject(project.toString());CloudFiles.entries(snapshot);CountDownLatch done=new CountDownLatch(1);JSONObject[] result={null};WebView[] view={null};Handler handler=new Handler(a.getMainLooper());
+  /*
+   * 只装 CloudFiles.entries 会读的两个字段，不要整份复制项目。
+   *
+   * <p>编译是整套工具里最频繁的动作（每轮改完文件都跑一次），
+   * 而 {@code entries()} 只看 {@code files} 和 {@code binaryFiles}。
+   * 整份复制会把快照、历史、调试报告一起抄进编译线程的临时对象里 ——
+   * 百 MB 级项目上这就是一次实打实的 OOM 风险，且跟编译结果毫无关系。
+   */
+  JSONObject snapshot=new JSONObject().put("files",new JSONObject(project.getJSONObject("files").toString()));
+  Object binaries=project.opt("binaryFiles");
+  if(binaries!=null)snapshot.put("binaryFiles",binaries);
+  CloudFiles.entries(snapshot);CountDownLatch done=new CountDownLatch(1);JSONObject[] result={null};WebView[] view={null};Handler handler=new Handler(a.getMainLooper());
   a.runOnUiThread(()->{try{WebView w=new WebView(a);view[0]=w;w.getSettings().setJavaScriptEnabled(true);w.getSettings().setAllowFileAccess(false);w.getSettings().setAllowContentAccess(false);w.getSettings().setBlockNetworkLoads(true);w.setWebViewClient(new WebViewClient(){@Override public WebResourceResponse shouldInterceptRequest(WebView v,WebResourceRequest r){try{if(!"neo-compiler.invalid".equals(r.getUrl().getHost()))return LocalRunner.blocked();String path=r.getUrl().getPath().substring(1);if(path.equals("project.json"))return LocalRunner.response("application/json",snapshot.toString().getBytes(StandardCharsets.UTF_8));if(!CloudFiles.path(path))return LocalRunner.blocked();return new WebResourceResponse(LocalRunner.mime(path),"UTF-8",a.getAssets().open(path));}catch(Exception e){return LocalRunner.blocked();}}});w.loadUrl("https://neo-compiler.invalid/local-runner.html");long deadline=System.currentTimeMillis()+60000;Runnable poll=new Runnable(){public void run(){if(done.getCount()==0)return;if(System.currentTimeMillis()>deadline){done.countDown();return;}w.evaluateJavascript("JSON.stringify(window.__neoBuild||null)",raw->{try{Object decoded=new JSONTokener(raw).nextValue();if(decoded instanceof String&&!decoded.equals("null")){result[0]=new JSONObject((String)decoded);done.countDown();return;}}catch(Exception ignored){}handler.postDelayed(this,200);});}};handler.postDelayed(poll,200);}catch(Exception e){done.countDown();}});
   try{if(!done.await(65,TimeUnit.SECONDS)||result[0]==null)throw new Exception("本地编译超时");JSONObject r=result[0];if(r.has("error"))throw new Exception(r.getString("error"));return r;}finally{done.countDown();a.runOnUiThread(()->{if(view[0]!=null){view[0].stopLoading();view[0].destroy();}});}
  }

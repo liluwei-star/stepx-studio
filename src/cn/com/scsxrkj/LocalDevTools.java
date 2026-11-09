@@ -13,7 +13,47 @@ import java.util.concurrent.*;
  */
 final class LocalDevTools {
  final MainActivity a;final JSONObject original;JSONObject staged;final JSONArray calls=new JSONArray();int artCalls;
- LocalDevTools(MainActivity a,JSONObject project)throws Exception{this.a=a;original=project==null?null:new JSONObject(project.toString());staged=project==null?null:new JSONObject(project.toString());}
+ /**
+  * 造一份「够工具用」的项目副本。
+  *
+  * <p><b>为什么不是整份拷贝：</b>项目对象里最占地方的是 {@code files}（所有文本内容），
+  * 其次是 {@code snapshots} 和 {@code history} —— 而工具循环<b>从来不读</b>后两者。
+  * 原来这里对传入项目做了两次 {@code new JSONObject(project.toString())}，
+  * 把快照、历史、调试报告、美术资源全部又抄了一遍。几十 MB 的工程，
+  * 一个请求里同时存在三份全文，手机堆顶掉就是「点发送之后应用直接退出」，
+  * 而这条路径跟 AI 逻辑毫无关系，极难联想到是拷贝。
+  *
+  * <p>所以只搬工具真正会读的字段。<b>不能改成直接接管传入对象</b> ——
+  * 「所有操作都在暂存副本上做，调用方的项目对象一个字不动」是这个类的核心契约，
+  * 自测里有一条专门守它（{@code tool stages new files without overwriting original}）。
+  */
+ static JSONObject leanCopy(JSONObject project)throws Exception{
+  JSONObject out=new JSONObject();
+  if(project==null)return out;
+  JSONObject files=project.optJSONObject("files");
+  out.put("files",new JSONObject(files==null?"{}":files.toString()));
+  /* 工具会读的其余字段：标识、名字、云端标记、二进制索引、美术资源 */
+  for(String k:new String[]{"id","name","cloudSource","binaryFiles","artAssets"}){
+   if(!project.has(k))continue;
+   Object v=project.opt(k);
+   out.put(k,v instanceof JSONObject?new JSONObject(v.toString())
+    :v instanceof JSONArray?new JSONArray(v.toString()):v);
+  }
+  return out;
+ }
+
+ LocalDevTools(MainActivity a,JSONObject project)throws Exception{
+  this.a=a;
+  /*
+   * 对比基准只装 files —— 它唯一被读的地方（diffMine、finalChanges）
+   * 都只取 original.optJSONObject("files")。
+   */
+  JSONObject files=project==null?null:project.optJSONObject("files");
+  original=project==null?null:new JSONObject().put("files",
+   new JSONObject(files==null?"{}":files.toString()));
+  /* 工作副本是精简副本：与调用方隔离，但不把快照和历史也抄一遍 */
+  staged=project==null?null:leanCopy(project);
+ }
  /**
  * 拼工具说明与行为准则。
  *
