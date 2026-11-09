@@ -165,7 +165,8 @@ final class ProjectEdits {
   */
  private static String fileProtocol(boolean nativeTools){
   if(nativeTools)return "文件改动请直接用 write_files / patch_file / multi_patch / replace_text 工具完成，"
-   +"不要把文件内容拼成 JSON 写进正文。工具调用会进暂存区，校验通过后才会真正落盘。";
+   +"不要把文件内容拼成 JSON 写进正文。工具调用会进暂存区，校验通过后才会真正落盘。"
+   +"删除文件：write_files 里把该路径的值写成 null。";
   return "只返回一个严格 JSON 对象：{\"summary\":\"说明\",\"files\":{\"文件路径\":\"完整内容\"}}。";
  }
  /**

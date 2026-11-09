@@ -124,7 +124,9 @@ final class ToolSchema {
    new Tool("check_project","编译检查整个项目，看有没有语法或引用错误。改完代码一定要调一次。",obj()),
    new Tool("run_tests","跑项目里的单元测试。测试文件按 *.test.ts / *.spec.js 命名，里面直接用 describe/it/expect。"
     +"结果里 ok 表示这次验证过没过；项目里没有测试文件时 ok 是 false、ran 是 false，那是没得跑而不是跑挂了。",obj()),
-   new Tool("run_script","在沙箱里跑一段 JavaScript，用来算东西或者验证逻辑。不能访问网络和文件系统。",obj("code",req(str("要执行的 JavaScript 代码")))),
+   new Tool("run_script","在沙箱里跑一段 JavaScript，用来算东西或者验证逻辑。不能访问网络和文件系统。"
+    +"沙箱里能读到项目文件，但改不到：在沙箱里改的文件不会写回项目，要真的改文件请用 write_file / patch_file。"
+    +"结果在 result 字段里，只有 console.log 的话只能在 log 里看到 —— 想让模型拿到计算结果就把值 return 出去。",obj("code",req(str("要执行的 JavaScript 代码")))),
    new Tool("run_preview","在真机上预览当前项目。改完想看效果时用。",obj()),
    new Tool("get_debug_reports","拿最近的崩溃日志和报错信息。预览跑出问题时用这个。",obj()),
    new Tool("build_apk","打包成 APK。用户明确说要打包、要安装、要上架时才用。",obj("context",str("打包时要附带的说明",""),"depth",num("包含多深的依赖目录",2))),
@@ -135,7 +137,7 @@ final class ToolSchema {
    new Tool("update_memory","整段重写记忆。记忆条目太乱或者快满了的时候整理用。",obj("content",req(str("完整的新记忆内容")),"scope",str("global 或 project，不填就自动",""))),
    new Tool("list_skills","列出所有技能（程序性记忆）的名字和一句话说明。",obj()),
    new Tool("read_skill","读一个技能的完整内容。要用某个做法时先读它。",obj("name",req(str("技能名字")))),
-   new Tool("write_skill","新建或覆盖一个技能。记下这个项目特有的做法，下次直接用。",obj("name",req(str("技能名字，只用字母数字和连字符")),"description",req(str("一句话说明这个技能什么时候用")),"content",req(str("技能的完整正文")))),
+   new Tool("write_skill","新建或覆盖一个技能。记下这个项目特有的做法，下次直接用。",obj("name",req(str("技能名字。字母数字、连字符、点号都可以，比如「清洗流程 v1.0」；不能带斜杠或路径符号")),"description",req(str("一句话说明这个技能什么时候用")),"content",req(str("技能的完整正文")))),
    new Tool("delete_skill","删掉一个技能。",obj("name",req(str("技能名字")))),
    new Tool("web_fetch","抓一个网址的内容。查官方文档、看别人的实现时用。",obj("url",req(str("要抓的网址，必须是 http 或 https")))),
    new Tool("web_search","搜索网上的资料。不知道某个 API 怎么用、想找参考实现时用。",obj("query",req(str("搜索词")),"limit",num("要几条结果，默认 5",5))),

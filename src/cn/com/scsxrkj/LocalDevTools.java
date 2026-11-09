@@ -239,6 +239,13 @@ static String instructions(boolean project,boolean nativeTools){
   +"\nlist_art_models、list_assets、generate_image(prompt,path可选,referenceFile可选,placeholder可选)："
   +"美术资源；generate_image 每轮最多3张（防刷屏），先 list_assets 复用已有图。"
   +"\ncheck_project：手动触发编译检查（改完系统会自动跑一次，一般不用手动调）。"
+  +"\nrun_tests：跑项目里的单元测试（*.test.ts / *.spec.js）。结果里 ok 是这次验证过没过，"
+  +"ran 是有没有真的跑起来 —— 项目里没有测试文件时 ok=false、ran=false，"
+  +"那表示没得跑，不是跑挂了，别当成通过。"
+  +"\nrun_script(code)：在沙箱里跑一段 JS，用来算东西、验证逻辑。"
+  +"沙箱里能读到项目文件，但改不到 —— 在沙箱里改的文件不会写回项目，"
+  +"要真的改文件必须用 write_file / patch_file / multi_patch。"
+  +"想让结果出现在结果里，就把值 return 出去；只 console.log 的话只有日志能看到。"
   +"\nrun_preview：打开离线预览，看实际效果。"
   +"\nget_debug_reports：取运行日志。看用户报的错之前先调这个，别只凭他一句话猜。"
   +"\ndiff_mine(withLines可选,path可选)：看你本轮改了什么 —— 新增/修改/删除的文件和具体行差异。"
@@ -434,6 +441,12 @@ JSONObject call(String name,JSONObject args)throws Exception{
    return new JSONObject().put("steps",items).put("count",items.length());
   }
   if(staged==null)throw new Exception("请先选择目标项目才能使用开发工具");
+  /*
+   * 文件表从当前暂存区现取。
+   *
+   * <p>每次工具调用都会重新进这里，所以这份引用反映的是此刻暂存区的内容 ——
+   * 前面 write_files / patch_file 改过的东西，这里读到的是改后的。
+   */
   JSONObject files=staged.getJSONObject("files"),out=new JSONObject();
   switch(name){
    case "list_art_models":return a.art.catalog();
@@ -519,8 +532,18 @@ JSONObject call(String name,JSONObject args)throws Exception{
     }
     break;
    }
-   case "replace_text":String editPath=args.getString("path"),oldText=args.getString("oldText"),newText=args.getString("newText");if(!files.has(editPath)||oldText.isEmpty())throw new Exception("无效的精确替换参数");String current=files.getString(editPath);int at=current.indexOf(oldText);if(at<0||current.indexOf(oldText,at+1)>=0)throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");String replaced=current.substring(0,at)+newText+current.substring(at+oldText.length());staged=ProjectEdits.apply(staged,files,new JSONObject().put(editPath,replaced),"AI 暂存");out.put("staged",true).put("path",editPath).put("replacements",1);break;
-   case "patch_file":out.put("result",patchFile(files,args));break;
+   case "replace_text":String editPath=args.getString("path"),oldText=args.getString("oldText"),newText=args.getString("newText");
+    /*
+     * 用当前暂存区的文件。
+     *
+     * <p>明确写出来而不是依赖外面那个变量：编辑类工具改完会换掉 staged，
+     * 这里必须以「此刻暂存区」为准，才能保证基线对得上、
+     * 不至于报「文件已变化，本轮建议未写入」。
+     */
+    JSONObject curFiles=staged.getJSONObject("files");
+    if(!curFiles.has(editPath)||oldText.isEmpty())throw new Exception("无效的精确替换参数");
+    String current=curFiles.getString(editPath);int at=current.indexOf(oldText);if(at<0||current.indexOf(oldText,at+1)>=0)throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");String replaced=current.substring(0,at)+newText+current.substring(at+oldText.length());staged=ProjectEdits.apply(staged,curFiles,new JSONObject().put(editPath,replaced),"AI 暂存");out.put("staged",true).put("path",editPath).put("replacements",1);break;
+   case "patch_file":out.put("result",patchFile(staged.getJSONObject("files"),args));break;
    /*
     * 批量局部改：一次调用改多个文件的多个位置。
     *
@@ -574,7 +597,7 @@ JSONObject call(String name,JSONObject args)throws Exception{
     }
     break;
    }
-   case "write_files":staged=ProjectEdits.apply(staged,files,args.getJSONObject("files"),"AI 暂存");out.put("staged",true).put("message","暂存文件已校验，最终成功后写回项目");break;
+   case "write_files":staged=ProjectEdits.apply(staged,staged.getJSONObject("files"),args.getJSONObject("files"),"AI 暂存");out.put("staged",true).put("message","暂存文件已校验，最终成功后写回项目");break;
    case "check_project":return LocalCompiler.check(a,staged);
    case "run_preview":CountDownLatch opened=new CountDownLatch(1);String[] failure={null};a.runOnUiThread(()->{try{if(a.localRunner!=null&&a.localRunner.dialog!=null)a.localRunner.dialog.dismiss();a.localRunner=new LocalRunner(a,staged);a.localRunner.start();}catch(Exception e){failure[0]=e.getMessage();}finally{opened.countDown();}});if(!opened.await(10,TimeUnit.SECONDS))throw new Exception("预览打开超时");if(failure[0]!=null)throw new Exception(failure[0]);out.put("opened",true).put("message","已打开离线预览，编译/运行日志可用get_debug_reports读取；打开不代表交互验收通过");break;
    case "get_debug_reports":synchronized(a){out.put("reports",a.byId("projects",staged.getString("id")).optJSONArray("debugReports"));}if(a.localRunner!=null&&a.localRunner.projectId.equals(staged.getString("id")))out.put("preview",a.localRunner.report());break;

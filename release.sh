@@ -241,7 +241,9 @@ if [ "$push_ok" != "1" ]; then
   # 工作区被 autocrlf 改成 CRLF，blob SHA 与远端对不上，文件会一直显示「已修改」。
   # 所以每个文件用 `git cat-file blob <sha>` 取原始内容。
   echo "  git push 不通，改走 GitHub Git Data API 推送..."
-  if python3 "$REPO/tools/push-via-api.py" "$GH_REPO" "main"; then
+  # 路径要转成 Windows 原生格式：MSYS 的 /c/Users/... 传给原生 Python 会被当成 \c\Users\...
+  PUSH_SCRIPT=$(cygpath -w "$REPO/tools/push-via-api.py")
+  if python3 "$PUSH_SCRIPT" "$GH_REPO" "main"; then
     push_ok=1
     echo "  已通过 API 推送到 main"
   else

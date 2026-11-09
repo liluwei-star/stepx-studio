@@ -366,6 +366,37 @@ final class SelfTest {
   }catch(Exception e){patchOk=false;patchErr=String.valueOf(e.getMessage());}
   check(patchOk,
    "patching the last line read_file reported does not hit an out-of-range error ("+patchErr+")");
+  /*
+   * 连着改两次：先 write_files 建文件，再 patch_file 改它。
+   *
+   * <p>这是 AGENT 最常见的动作序列。两个工具必须看到同一份最新的暂存区，
+   * 否则第二个会拿旧内容算新内容，或者直接报「文件已变化」。
+   */
+  LocalDevTools seqDev=new LocalDevTools(a,new JSONObject().put("id","qa-seq").put("name","Seq")
+   .put("files",new JSONObject().put("index.html","<html></html>")));
+  String seqErr="";
+  try{
+   seqDev.call("write_files",new JSONObject().put("files",
+    new JSONObject().put("app.js","const a=1;\nconst b=2;\n")));
+  }catch(Exception e){seqErr="write_files: "+e.getMessage();}
+  JSONObject seqPatch=new JSONObject();
+  try{
+   seqPatch=seqDev.call("patch_file",new JSONObject().put("path","app.js")
+    .put("startLine",2).put("newContent","const b=3;"));
+  }catch(Exception e){seqErr=seqErr+(seqErr.isEmpty()?"":"; ")+"patch_file: "+e.getMessage();}
+  check(seqPatch.optJSONObject("result")!=null&&seqPatch.getJSONObject("result").optBoolean("staged",false),
+   "a patch right after a write_file succeeds ("+seqErr+")");
+  JSONObject seqRead=seqDev.call("read_file",new JSONObject().put("path","app.js"));
+  check(seqRead.optString("content","").contains("const b=3;"),
+   "the second edit sees the first edit result");
+  /*
+   * 精确替换也要看到最新内容。
+   */
+  seqDev.call("replace_text",new JSONObject().put("path","app.js")
+   .put("oldText","const a=1;").put("newText","const a=9;"));
+  JSONObject seqRead2=seqDev.call("read_file",new JSONObject().put("path","app.js"));
+  check(seqRead2.optString("content","").contains("const a=9;"),
+   "replace_text sees the file as it is now");
   check(autoAfter>=1,
    "the automatic snapshots are still kept");
   a.remove("projects","qa-snapkeep");
