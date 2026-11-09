@@ -328,6 +328,44 @@ final class SelfTest {
    "a src glob does not match another directory");
   check(LocalDevTools.globMatch("src/app/x.tsx","*.tsx"),
    "a bare extension glob matches in any directory");
+  /*
+   * 行号口径必须三处一致。
+   *
+   * <p>read_file / list_files / patch_file 报的行数如果不一样，
+   * 模型照着 read_file 的行号去改，就会撞「起始行超出文件行数」——
+   * 明明是同一个文件。
+   */
+  JSONObject lfFiles=new JSONObject()
+   .put("index.html","<html></html>")
+   .put("a.js","l1\nl2\nl3\nl4\nl5\n");
+  LocalDevTools lfDev=new LocalDevTools(a,new JSONObject().put("id","qa-lines").put("name","Lines")
+   .put("files",lfFiles));
+  JSONObject lfRead=lfDev.call("read_file",new JSONObject().put("path","a.js"));
+  check(lfRead.optInt("totalLines",0)==5,
+   "read_file does not count the trailing newline as a line");
+  JSONObject lfList=lfDev.call("list_files",new JSONObject().put("prefix",""));
+  int listedLines=0;
+  JSONArray lfGroups=lfList.optJSONArray("files");
+  if(lfGroups!=null)for(int gi=0;gi<lfGroups.length();gi++){
+   JSONArray g=lfGroups.optJSONObject(gi).optJSONArray("files");
+   if(g==null)continue;
+   for(int fi=0;fi<g.length();fi++){
+    JSONObject f=g.optJSONObject(fi);
+    if(f!=null&&"a.js".equals(f.optString("path")))listedLines=f.optInt("lines",0);
+   }
+  }
+  check(listedLines==5,
+   "list_files counts the same lines as read_file");
+  /*
+   * 关键：按 read_file 报的行号去改，不能撞越界。
+   */
+  boolean patchOk=true;String patchErr="";
+  try{
+   lfDev.call("patch_file",new JSONObject().put("path","a.js")
+    .put("startLine",lfRead.optInt("totalLines",0)).put("newContent","last"));
+  }catch(Exception e){patchOk=false;patchErr=String.valueOf(e.getMessage());}
+  check(patchOk,
+   "patching the last line read_file reported does not hit an out-of-range error ("+patchErr+")");
   check(autoAfter>=1,
    "the automatic snapshots are still kept");
   a.remove("projects","qa-snapkeep");

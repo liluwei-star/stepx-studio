@@ -456,7 +456,22 @@ JSONObject call(String name,JSONObject args)throws Exception{
      */
     String path=args.getString("path");
     if(!files.has(path))throw new Exception(fileMissingMessage(path,files));
-    String[] lines=files.getString(path).split("\\n",-1);
+    /*
+     * 拆行时要分清「内容有几行」和「末尾有没有换行」。
+     *
+     * <p>split(-1) 在文件以换行结尾时会多出一个空元素 ——
+     * 「a\nb\nc\n」拆成 4 段而不是 3 段。于是 read_file 报 totalLines=4，
+     * 而 patch_file 报 3：模型照 read_file 给的行号去改，会撞上
+     * 「起始行 4 超出文件行数 3」，明明是同一个文件，两边说法不一致。
+     *
+     * <p>所以这里跟 patch_file 用同一套算法：末尾那个换行不算一行。
+     */
+    String rawText=files.getString(path);
+    String[] raw=rawText.split("\\n",-1);
+    int lineCount=raw.length;
+    if(lineCount>0&&raw[raw.length-1].isEmpty()&&rawText.endsWith("\n"))lineCount--;
+    String[] lines=new String[lineCount];
+    System.arraycopy(raw,0,lines,0,lineCount);
     int start=Math.max(1,args.optInt("startLine",1));
     int count=Math.max(1,args.optInt("lineCount",lines.length));
     if(start>lines.length)throw new Exception("起始行 "+start+" 超出文件总行数："+path+" 一共 "
@@ -660,9 +675,24 @@ JSONObject call(String name,JSONObject args)throws Exception{
      * 逐字符 charAt 在大文件上是 O(n) 的解释执行，比 indexOf 慢一个量级；
      * 82 MB 的项目里这一项能差出好几秒。
      */
-    int lines=1;
-    int nl=content.indexOf('\n');
-    while(nl>=0){lines++;nl=content.indexOf('\n',nl+1);}
+    /*
+     * 行数跟 read_file、patch_file 用同一个口径：
+     * 末尾的换行不算一行。
+     *
+     * <p>原来数的是「换行符个数 + 1」，文件以换行结尾时会多算一行。
+     * 于是 list_files 说 101 行、patch_file 说 100 行 ——
+     * 模型照着列表里的行号去改，会撞「起始行超出文件行数」。
+     *
+     * <p>仍然用 indexOf 循环，不逐字符扫：逐字符 charAt 在大文件上
+     * 是 O(n) 的解释执行，比 indexOf 慢一个量级。
+     */
+    int lines=0;
+    if(!content.isEmpty()){
+     int nl=content.indexOf('\n');
+     while(nl>=0){lines++;nl=content.indexOf('\n',nl+1);}
+     // 末尾没有换行时，最后一段内容也占一行
+     if(!content.endsWith("\n"))lines++;
+    }
     group.put(new JSONObject().put("path",n).put("lines",lines).put("characters",content.length())
      .put("kind",kindOf(n)));
     listed++;
