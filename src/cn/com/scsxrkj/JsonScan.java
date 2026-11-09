@@ -42,8 +42,22 @@ final class JsonScan {
      */
     static int endOfJsonObject(String s, int from) {
         if (s == null || from < 0 || from >= s.length()) return -1;
+        char first = s.charAt(from);
+        if (first != '{' && first != '[') return -1;
         boolean inString = false, escaped = false;
-        int depth = 0;
+        /*
+         * 用栈记录还没闭合的括号，而不是只数深度。
+         *
+         * <p>只数深度的话，{ 和 ] 一样能让深度减一 —— 于是 {"a":1]} 这种
+         * 括号类型写串的片段会被当成「在 ] 处配平」，截出一个非法 JSON 的半个字符串，
+         * 上层解析必然失败。用栈则能立刻发现「该 ] 却来了 }」，直接判成配不平，
+         * 交给调用方按「没有 JSON」处理（继续找、或走重试），
+         * 而不是拿一段注定解析不了的文本去撞解析器。
+         *
+         * <p>另一个好处是：配平位置只认栈真正空掉的那一刻，
+         * 不会因为某个多余的右括号把深度数错而提前收工。
+         */
+        java.util.ArrayDeque<Character> stack = new java.util.ArrayDeque<>();
         for (int i = from; i < s.length(); i++) {
             char c = s.charAt(i);
             if (inString) {
@@ -53,10 +67,12 @@ final class JsonScan {
                 continue;
             }
             if (c == '"') { inString = true; continue; }
-            if (c == '{' || c == '[') { depth++; }
-            else if (c == '}' || c == ']') {
-                depth--;
-                if (depth == 0) return i;
+            if (c == '{' || c == '[') { stack.push(c); continue; }
+            if (c == '}' || c == ']') {
+                char want = c == '}' ? '{' : '[';
+                if (stack.isEmpty() || stack.peek() != want) return -1;
+                stack.pop();
+                if (stack.isEmpty()) return i;
             }
         }
         return -1;

@@ -147,7 +147,19 @@ final class CloudStaging {
 
         File out = fileOf(projectId, basePath);
         long total = 0;
-        try (RandomAccessFile raf = new RandomAccessFile(out, "rw")) {
+        /*
+         * 先写到临时文件，全部拼完再改名。
+         *
+         * <p>直接往目标文件里写（setLength(0) 之后逐片追加）有个隐患：
+         * 中途任何一片缺失都会抛异常，而那时目标文件已经被清空并写入了前半截。
+         * 如果这个路径上本来有一份完整的旧文件（比如先下过完整版、
+         * 后来云端改成多片重新同步），一次失败的合并会把能用的文件换成半截。
+         *
+         * <p>临时文件放在同一个目录，改名是原子的；失败就把临时文件删掉，
+         * 原来的文件一个字节都没动。
+         */
+        File tmp = new File(out.getParentFile(), out.getName() + ".merging");
+        try (RandomAccessFile raf = new RandomAccessFile(tmp, "rw")) {
             raf.setLength(0);
             for (String s : sorted) {
                 File part = fileOf(projectId, s);
@@ -161,6 +173,13 @@ final class CloudStaging {
                     }
                 }
             }
+        } catch (Exception e) {
+            tmp.delete();
+            throw e;
+        }
+        if (!tmp.renameTo(out)) {
+            tmp.delete();
+            throw new Exception("无法写入合并结果：" + basePath);
         }
         return total;
     }

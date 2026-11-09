@@ -36,8 +36,18 @@ function indexOfJsonStart(s) {
   return -1;
 }
 
+/*
+ * 与 src/cn/com/scsxrkj/JsonScan.java 的 endOfJsonObject 保持一致：
+ * 用栈记录未闭合的括号，而不是只数深度。
+ * 只数深度的话 {"a":1]} 这种括号类型写串的片段会被当成在 ] 处配平，
+ * 截出一个非法 JSON 的半个字符串，上层解析必然失败。
+ */
 function endOfJsonObject(s, from) {
-  let inString = false, escaped = false, depth = 0;
+  if (s == null || from < 0 || from >= s.length) return -1;
+  const first = s.charAt(from);
+  if (first !== '{' && first !== '[') return -1;
+  let inString = false, escaped = false;
+  const stack = [];
   for (let i = from; i < s.length; i++) {
     const c = s.charAt(i);
     if (inString) {
@@ -47,8 +57,13 @@ function endOfJsonObject(s, from) {
       continue;
     }
     if (c === '"') { inString = true; continue; }
-    if (c === '{' || c === '[') depth++;
-    else if (c === '}' || c === ']') { depth--; if (depth === 0) return i; }
+    if (c === '{' || c === '[') { stack.push(c); continue; }
+    if (c === '}' || c === ']') {
+      const want = c === '}' ? '{' : '[';
+      if (stack.length === 0 || stack[stack.length - 1] !== want) return -1;
+      stack.pop();
+      if (stack.length === 0) return i;
+    }
   }
   return -1;
 }
