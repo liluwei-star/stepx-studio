@@ -18,7 +18,7 @@
  *   renameProject       改项目名字
  *   deleteProject       把项目移到「最近删除」（可恢复）
  *   trash               打开「最近删除」页，里面能恢复或彻底删除
- *   restoreSnapshot     把项目回滚到上一版快照（只保留最近一版）
+ *   restoreSnapshot     把项目回滚到上一版快照（自动存档留 5 份，手动存档一直保留）
  *   exportProject       把项目全部文件打成 ZIP 导出
  *   importProject       【导入 HTML / ZIP】把外面做好的网页项目搬进本应用。
  *                       点下去会打开手机的文件选择器，两种选法：
@@ -483,10 +483,26 @@ function computeDiff(p, snapIndex){
       if(!(n in nowFiles))removed.push(n);
     }
   }
-  // 二进制文件不在 files 里，单独提一下 —— 同步/导入进来的图片、模型
-  // 也算「这次变了什么」的一部分
-  const oldBins=snap.binaryFiles||{};
-  for(const n of Object.keys(p.binaryFiles||{})){
+  /*
+   * 二进制文件不在 files 里，单独提一下 —— 同步/导入进来的图片、模型
+   * 也算「这次变了什么」的一部分。
+   *
+   * <p><b>两个字段都要认：</b>新存档把引用表存在 {@code bins} 下，
+   * 老存档（以及 Java 侧老项目）存在 {@code binaryFiles} 下。
+   * 只读一个的话，二进制变更永远算错 ——
+   * 要么把已有的图全列成「新增」，要么图片换了内容也看不出来。
+   */
+  /*
+   * 二进制清单可能来自三个地方：
+   * · {@code snap.binNames} —— 原生推给前端的瘦身快照（只有路径名）；
+   * · {@code snap.bins} —— 新存档在本地存的引用表；
+   * · {@code snap.binaryFiles} —— 老存档的字段名。
+   * 一个都不认的话，图片会被全部列成「新增」。
+   */
+  const oldBins=snap.binNames?Object.fromEntries(snap.binNames.map(n=>[n,1]))
+    :(snap.bins||snap.binaryFiles||{});
+  const nowBins=p.binaryFiles||{};
+  for(const n of Object.keys(nowBins)){
     if(!(n in oldBins))addedBinary.push(n);
   }
 
@@ -1769,8 +1785,8 @@ const EXPLAIN={
     '把 AI 建议的改动批量导入项目。\n\n'+
     '导入前会和当前文件做比对，如果这期间你自己也改过同一个文件，会提示冲突，不会强行覆盖。'],
   restoreSnapshot:['恢复上一版',
-    '把项目回滚到上一次修改之前的状态。\n\n'+
-    '注意：只保留最近一版快照，再往前就回不去了。\n'+
+    '把项目回滚到上一次修改之前的状态，图片、模型这类大文件也会一起回滚。\n\n'+
+    '你自己手动存的存档会一直保留；系统自动存的留最近 5 份，更早的会被顶掉。\n'+
     '恢复前建议先导出一次项目做备份。'],
   cloudList:['同步云端项目',
     '从官方 Studio 云端拉取项目列表，看看云端上有哪些项目。\n\n'+

@@ -141,7 +141,18 @@ if(mIdx>=0){
 }
 
 const edits=readSrc('src/cn/com/scsxrkj/ProjectEdits.java');
-check(edits.includes('DevAgent.indexOfJsonStart'),'ProjectEdits.parse 用健壮的 JSON 边界定位');
+/*
+ * 边界定位现在在 JsonScan 里 —— 它从 DevAgent 抽出来单独一个类，
+ * 免得 ProjectEdits 为了两个纯字符串函数背上整个 Activity 依赖。
+ * 这里断言的是「用的是那套健壮实现」，不是「实现长在哪个类上」。
+ */
+const jsonScan = readSrc('src/cn/com/scsxrkj/JsonScan.java');
+check(edits.includes('JsonScan.indexOfJsonStart') && edits.includes('JsonScan.endOfJsonObject'),
+  'ProjectEdits.parse 用健壮的 JSON 边界定位');
+check(jsonScan.includes('if (escaped) { escaped = false; continue; }'),
+  '边界定位会跳过字符串里的括号和转义');
+check(!/static int indexOfJsonStart\(String s\)\{/.test(readSrc('src/cn/com/scsxrkj/DevAgent.java')),
+  'DevAgent 不再自己留一份重复实现');
 
 /* ── 汇总 ─────────────────────────────────────────────── */
 console.log('\n────────────────────────────────');

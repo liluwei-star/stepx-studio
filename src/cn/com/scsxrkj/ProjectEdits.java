@@ -38,9 +38,9 @@ final class ProjectEdits {
   JSONObject o=null;
   try{o=new JSONObject(s);}catch(Exception ignore){}
   if(o==null){
-   int from=DevAgent.indexOfJsonStart(s);
+   int from=JsonScan.indexOfJsonStart(s);
    if(from<0)throw new Exception("模型没有返回可解析的 JSON");
-   int to=DevAgent.endOfJsonObject(s,from);
+   int to=JsonScan.endOfJsonObject(s,from);
    if(to<0)throw new Exception("模型返回的 JSON 不完整");
    o=new JSONObject(s.substring(from,to+1));
   }
@@ -137,6 +137,7 @@ final class ProjectEdits {
   JSONObject base=project.getJSONObject("files");
   JSONObject next=mergeChecked(project,base,changes);
   if(!same(next,base))project.put("files",next);
+  applyBinaryChanges(project,changes);
  }
 
  /**
@@ -152,8 +153,19 @@ final class ProjectEdits {
   while(it.hasNext()){
    String n=it.next();
    if(changes.isNull(n)){
-    if(!next.has(n))throw new Exception("不能删除不存在的文件："+n);
-    next.remove(n);
+    /*
+     * 图片、字体、模型权重这些在 binaryFiles 里，不在 files 里。
+     *
+     * <p>原来这里只看 files，于是模型想删一张图，得到的回复是
+     * 「不能删除不存在的文件：assets/photo.png」——
+     * 文件明明在，只是存在另一张表。模型会反复重试同一句话，
+     * 或者干脆放弃改成别的方式，最后图还在磁盘上。
+     */
+    boolean inText=next.has(n);
+    boolean inBin=project!=null&&project.optJSONObject("binaryFiles")!=null
+      &&project.getJSONObject("binaryFiles").has(n);
+    if(!inText&&!inBin)throw new Exception("不能删除不存在的文件："+n);
+    if(inText)next.remove(n);
    }else{
     if(!(changes.get(n) instanceof String))throw new Exception("文件内容必须是文本");
     next.put(n,changes.getString(n));
@@ -194,11 +206,60 @@ final class ProjectEdits {
   return next;
  }
 
+ /**
+  * 把本轮改动同步到二进制表。
+  *
+  * <p>两条规则，缺一条都会留下「幽灵引用」：
+  *
+  * <ul>
+  *   <li><b>值为 null</b> —— 用户/模型要删这个路径。
+  *       文本表删了还不够，binaryFiles 里那条也得删，
+  *       否则文件树里没了、同步上云时还在，磁盘上的 .bin 也永远不回收。</li>
+  *   <li><b>值是文本</b> —— 这个路径现在变成文本文件了。
+  *       binaryFiles 里同名的旧引用必须去掉，不然同一路径会同时
+  *       出现在两张表里，导出、同步、构建各按各的理解走一遍。</li>
+  * </ul>
+  *
+  * @param project 项目对象（会被就地修改）
+  * @param changes 本轮改动
+  */
+ static void applyBinaryChanges(JSONObject project,JSONObject changes)throws Exception{
+  applyBinaryChangesTouched(project,changes);
+ }
+
+ /**
+  * 同上，但返回这一轮有没有真的动到二进制表。
+  *
+  * <p>调用方要据此判断「这轮是否完全没变化」——
+  * 只删一张图时文本表是没变的，不能因此当成没改动。
+  */
+ static boolean applyBinaryChangesTouched(JSONObject project,JSONObject changes)throws Exception{
+  if(project==null||changes==null)return false;
+  JSONObject bins=project.optJSONObject("binaryFiles");
+  if(bins==null)return false;
+  boolean touched=false;
+  for(Iterator<String> it=changes.keys();it.hasNext();){
+   String n=it.next();
+   if(bins.has(n)){bins.remove(n);touched=true;}
+  }
+  if(touched&&bins.length()==0)project.remove("binaryFiles");
+  return touched;
+ }
+
  static JSONObject apply(JSONObject p,JSONObject base,JSONObject changes,String source)throws Exception{
   if(!same(p.getJSONObject("files"),base))throw new Exception("文件已变化，本轮建议未写入；请基于最新文件重新发送");
   /* 合并与校验统一走 mergeChecked，和暂存路径同一套规则，不会各写一份。 */
   JSONObject next=mergeChecked(p,base,changes);
-  JSONObject out=new JSONObject(p.toString());if(same(next,base))return out;
+  JSONObject out=new JSONObject(p.toString());
+  /*
+   * 先把二进制表的改动做在副本上，再看这一轮到底有没有变化。
+   *
+   * <p>顺序不能反：只删一张图时 files 那份表一个字都没变，
+   * 先判 {@code same(next,base)} 就会直接返回，
+   * 二进制表那条删除悄悄没做 —— 用户以为删了，图还在磁盘上。
+   */
+  boolean binsTouched=applyBinaryChangesTouched(out,changes);
+  if(same(next,base)&&!binsTouched)return out;
   /*
     * 存档只存**这次改动的文件的旧内容**，不存整个项目。
     *
@@ -242,8 +303,14 @@ final class ProjectEdits {
      added.put(n);
     }
    }
+   /* 改动前的二进制引用也存一份，恢复时才能连图一起回来 */
+   JSONObject oldBins=p.optJSONObject("binaryFiles");
+   JSONObject snapBins=oldBins==null?null:new JSONObject(oldBins.toString());
    JSONArray mine=new JSONArray();
-   mine.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("added",added).put("delta",true).put("source","auto"));
+   JSONObject one=new JSONObject().put("time",System.currentTimeMillis())
+     .put("files",delta).put("added",added).put("delta",true).put("source","auto");
+   if(snapBins!=null)one.put("bins",snapBins);
+   mine.put(one);
    out.put("snapshots",CloudFiles.trimSnapshots(snaps,mine)).put("files",next).put("updated",System.currentTimeMillis());
   JSONArray h=out.optJSONArray("history");if(h==null)h=new JSONArray();h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","apply").put("text",source+" · "+changes.length()+" 个文件；运行验收待完成。"));out.put("history",h);return out;
  }

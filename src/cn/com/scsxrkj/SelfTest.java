@@ -4,6 +4,31 @@ import java.io.*;
 /** 整体自检：跑一批内置检查，确认核心功能没坏。只在调试版触发。 */
 final class SelfTest {
  static int passed;static JSONArray details;
+ /**
+  * 取一条消息的文字内容，两种形态都认。
+  *
+  * <p>OpenAI 路径 content 是字符串；Anthropic 路径是块数组
+  * （text 块 + tool_use / tool_result 块）。直接 {@code optString} 在数组上
+  * 会拿到空串 —— 断言看起来「原始提问丢了」，其实是取值方式不对。
+  */
+ static String textOf(JSONObject m)throws Exception{
+  if(m==null)return "";
+  Object raw=m.opt("content");
+  if(raw instanceof String)return (String)raw;
+  if(raw instanceof JSONArray){
+   StringBuilder sb=new StringBuilder();
+   JSONArray arr=(JSONArray)raw;
+   for(int i=0;i<arr.length();i++){
+    JSONObject blk=arr.optJSONObject(i);
+    if(blk==null)continue;
+    if("text".equals(blk.optString("type","")))sb.append(blk.optString("text",""));
+    else if(blk.has("content")&&blk.opt("content") instanceof String)sb.append(blk.optString("content",""));
+   }
+   return sb.toString();
+  }
+  return "";
+ }
+
  static void check(boolean b,String name)throws Exception{if(!b)throw new Exception("FAIL "+name);passed++;details.put(name);}
  static JSONObject response(String json)throws Exception{return new JSONObject(json);}
  static JSONObject profile(String path,String protocol)throws Exception{return new JSONObject().put("endpoint","http://127.0.0.1:8768/"+path).put("protocol",protocol).put("model","fixture").put("maxTokens",128);}
@@ -1087,12 +1112,24 @@ final class SelfTest {
      .put("tool_calls",new JSONArray().put(new JSONObject().put("id",id).put("type","function")
       .put("function",new JSONObject().put("name","read_file").put("arguments","{}")))));
     longHistory.put(new JSONObject().put("role","tool").put("tool_call_id",id)
-     .put("content","文件内容 ".repeat(2000)+i));
+     .put("content",rep("文件内容 ",2000)+i));
    }
    JSONArray trimmed=DevAgent.trimToolHistory(longHistory,200*1024);
    check(trimmed.length()<longHistory.length(),"a long tool history is trimmed");
-   check(trimmed.length()>0&&"原始任务".equals(trimmed.optJSONObject(0).optString("content","")),
-    "the original request survives the trim");
+   /*
+    * 原始提问必须留在最前面 —— 但内容不一定「只等于」那句话。
+    *
+    * <p>裁剪会在中间插一条「较早的 N 段工具交互已移除」的说明，
+    * 而它是 role:user，紧跟在用户原始提问后面。严格交替的服务端
+    * （Bedrock、部分中转）不接受连续两条 user，所以这两条会被合并成一条：
+    * 内容变成「原始任务\n\n【较早的…】」。
+    *
+    * <p>判据要看的是「原始提问还在不在最前面」，不是「这一条里有没有别的话」。
+    * 用 equals 会把正确的合并判成失败。
+    */
+   String firstTrimmed=trimmed.length()>0?trimmed.optJSONObject(0).optString("content",""):"";
+   check(firstTrimmed.startsWith("原始任务"),
+    "the original request survives the trim [head="+firstTrimmed.substring(0,Math.min(60,firstTrimmed.length()))+"]");
    /* 每条 tool 消息都必须有配对的 assistant tool_calls */
    JSONArray callIds=new JSONArray();
    for(int i=0;i<trimmed.length();i++){
@@ -1296,12 +1333,58 @@ final class SelfTest {
       .put("name","read_file").put("input",new JSONObject()))));
     anthHistory.put(new JSONObject().put("role","user")
      .put("content",new JSONArray().put(new JSONObject().put("type","tool_result")
-      .put("tool_use_id",id).put("content","内容 ".repeat(4000)))));
+      .put("tool_use_id",id).put("content",rep("内容 ",4000)))));
    }
    JSONArray anthTrimmed=DevAgent.trimToolHistory(anthHistory,200*1024);
    check(anthTrimmed.length()<anthHistory.length(),"an anthropic-style history is trimmed too");
-   check(anthTrimmed.length()>0&&"原始任务".equals(anthTrimmed.optJSONObject(0).optString("content","")),
-    "the original request survives the anthropic-style trim");
+   /*
+    * 判据跟上面那条同理：原始提问要在最前面，
+    * 但它可能已经跟「较早的 N 段已移除」那条说明合并过。
+    * 而且 Anthropic 路径下 content 是数组，optString 取不到文字 ——
+    * 要用一个能读两种形态的取值方法。
+    */
+   check(textOf(anthTrimmed.optJSONObject(0)).startsWith("原始任务"),
+    "the original request survives the anthropic-style trim [head="
+     +textOf(anthTrimmed.optJSONObject(0)).substring(0,Math.min(60,textOf(anthTrimmed.optJSONObject(0)).length()))+"]");
+   /*
+    * 模型说了话 + 调了工具 —— 这才是真机上会出现的形态。
+    *
+    * <p><b>为什么上面那条测不出来：</b>上面造的是纯 tool_use 消息，
+    * content 数组里全是工具块。而真机上 assistant 的 content 数组里
+    * 还会有模型这一轮说的正文（text 块）。
+    *
+    * <p>原来裁剪的判据要求「数组里全是 tool_use 才算工具调用消息」，
+    * 于是混着正文的那条被判成普通消息，它的 tool_result 被留成独立一组。
+    * 裁剪一按组丢，就可能只丢一半 —— 协议不完整，服务端 400，
+    * AGENT 循环当场崩掉。
+    *
+    * <p>这里扫预算来验：孤儿只出现在「剩余预算落在 [结果长度, 结果长度+正文长度)」
+    * 这个窄窗口里，固定一个预算未必落在窗口内。扫过去就一定能撞上。
+    */
+   boolean anthOrphanFound=false;
+   String anthOrphanDetail="";
+   boolean anthTrimHappened=false;
+   for(int budget=2000;budget<=90000;budget+=500){
+    JSONArray probe=new JSONArray();
+    probe.put(new JSONObject().put("role","user").put("content","原始任务"));
+    for(int i=0;i<8;i++){
+     String id="tp_"+i;
+     probe.put(new JSONObject().put("role","assistant")
+      .put("content",new JSONArray()
+       .put(new JSONObject().put("type","text").put("text","第 "+i+" 轮我先看看这个文件"))
+       .put(new JSONObject().put("type","tool_use").put("id",id)
+        .put("name","read_file").put("input",new JSONObject()))));
+     probe.put(new JSONObject().put("role","user")
+      .put("content",new JSONArray().put(new JSONObject().put("type","tool_result")
+       .put("tool_use_id",id).put("content",rep("内容 ",200+i*37)))));
+    }
+    JSONArray cut=DevAgent.trimToolHistory(probe,budget);
+    if(cut.length()!=probe.length())anthTrimHappened=true;
+    String orphan=anthOrphan(cut);
+    if(!orphan.isEmpty()){anthOrphanFound=true;anthOrphanDetail="budget="+budget+" "+orphan;break;}
+   }
+   check(anthTrimHappened,"the budget sweep actually trimmed something");
+   check(!anthOrphanFound,"the trim never leaves an orphan tool message "+anthOrphanDetail);
    JSONObject missResult=smoke.call("search_code",new JSONObject().put("query","zzz_绝对不存在的字符串_zzz"));
    check(!missResult.optBoolean("found",true)&&missResult.optString("note","").contains("list_files"),
     "a search miss explains itself instead of returning a bare empty array");
@@ -2110,6 +2193,67 @@ final class SelfTest {
   * <p>单独放一个方法，是为了不必在巨大的 run() 里找插入点 ——
   * 那里面字符串和注释里的花括号让括号配平没法用来定位结尾。
   */
+ /**
+  * 检查一批消息里有没有「孤儿」工具消息。
+  *
+  * <p><b>孤儿 =</b> tool_use 找不到配对的 tool_result，或者反过来。
+  * 出现孤儿就意味着下一轮请求的协议是断的，服务端会直接 400。
+  *
+  * <p><b>为什么必须双向查：</b>只查 tool_result 找不到 tool_use 会漏掉
+  * 「tool_use 被丢掉、tool_result 留下」这一种 —— 而它恰恰是最容易发生的那一种
+  * （裁剪从最新往回装整组，assistant 消息比 tool_result 短，
+  * 于是经常只剩后者）。
+  */
+ static String anthOrphan(JSONArray msgs)throws Exception{
+  if(msgs==null)return "";
+  java.util.ArrayList<String> ids=new java.util.ArrayList<>();
+  java.util.ArrayList<String> uses=new java.util.ArrayList<>();
+  for(int i=0;i<msgs.length();i++){
+   JSONObject m=msgs.optJSONObject(i);
+   if(m==null)continue;
+   Object raw=m.opt("content");
+   if(!(raw instanceof JSONArray))continue;
+   JSONArray arr=(JSONArray)raw;
+   for(int c=0;c<arr.length();c++){
+    JSONObject blk=arr.optJSONObject(c);
+    if(blk==null)continue;
+    String type=blk.optString("type","");
+    if("tool_result".equals(type))ids.add(blk.optString("tool_use_id",""));
+    else if("tool_use".equals(type))uses.add(blk.optString("id",""));
+   }
+  }
+  java.util.ArrayList<String> bad=new java.util.ArrayList<>();
+  for(int i=0;i<ids.size();i++){
+   String id=ids.get(i);
+   if(id.isEmpty()||uses.contains(id))continue;
+   bad.add("tool_result:"+id);
+  }
+  for(int i=0;i<uses.size();i++){
+   String id=uses.get(i);
+   if(id.isEmpty()||ids.contains(id))continue;
+   bad.add("tool_use:"+id);
+  }
+  return bad.isEmpty()?"":bad.toString();
+ }
+
+ /**
+ * 造一个重复 n 次的字符串。
+ *
+ * <p><b>不用 {@code String.repeat}</b> —— 那是 API 33 才有的，
+ * 而本应用最低支持 API 24，d8 也没有开核心库脱糖。
+ * 真机上那一步会直接抛 {@code NoSuchMethodError}。
+ *
+ * @param s 要重复的片段
+ * @param n 重复次数
+ * @return 重复 n 次后的字符串
+ */
+ static String rep(String s,int n){
+  if(n<=0)return "";
+  StringBuilder b=new StringBuilder(s.length()*n);
+  for(int i=0;i<n;i++)b.append(s);
+  return b.toString();
+ }
+
  static void newChecks(MainActivity a)throws Exception{
   /*
    * 删文件必须真的删掉。
@@ -2139,6 +2283,54 @@ final class SelfTest {
    check(f.has("index.html"),"the entry file is never removed by a delete list");
    check(!delProject.getJSONObject("binaryFiles").has("gone.png"),
     "the binary reference is dropped together with the file");
+  }
+  /*
+   * AI 删二进制文件要真删得掉，改文本时不能留幽灵引用。
+   *
+   * <p>图片、模型权重在 binaryFiles 表里，不在 files 表。
+   * ProjectEdits 以前只认 files，于是模型想删一张图，得到的是
+   * 「不能删除不存在的文件」—— 文件明明在，只是存在另一张表。
+   * 反过来，把某路径改成文本时不清 binaryFiles 里的同名旧引用，
+   * 同一路径会同时出现在两张表里，导出、同步、构建各按各的理解走一遍。
+   */
+  {
+   JSONObject binProj=new JSONObject()
+    .put("id","qa-bin-edit")
+    .put("name","Bin fixture")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body>x</body></html>"))
+    .put("binaryFiles",new JSONObject()
+     .put("assets/photo.png","aaa.bin")
+     .put("assets/icon.svg","bbb.bin"));
+   JSONObject delBin=new JSONObject().put("assets/photo.png",JSONObject.NULL);
+   boolean deletedAway=false;
+   try{
+    ProjectEdits.stage(binProj,delBin);
+    JSONObject binsAfter=binProj.optJSONObject("binaryFiles");
+    deletedAway=binsAfter!=null&&!binsAfter.has("assets/photo.png");
+   }catch(Exception e){deletedAway=false;}
+   check(deletedAway,"deleting a binary file through write_files really removes its reference");
+
+   JSONObject binProj2=new JSONObject()
+    .put("id","qa-bin-edit2")
+    .put("name","Bin fixture 2")
+    .put("files",new JSONObject().put("index.html","<!doctype html><html><body>x</body></html>"))
+    .put("binaryFiles",new JSONObject().put("assets/icon.svg","bbb.bin"));
+   boolean staleGone=false;
+   try{
+    ProjectEdits.stage(binProj2,new JSONObject().put("assets/icon.svg","<svg/>"));
+    JSONObject bins2=binProj2.optJSONObject("binaryFiles");
+    staleGone=(bins2==null||!bins2.has("assets/icon.svg"))
+      &&"<svg/>".equals(binProj2.getJSONObject("files").optString("assets/icon.svg"));
+   }catch(Exception e){staleGone=false;}
+   check(staleGone,"rewriting a binary path as text clears the stale binary reference");
+
+   boolean stillRejects=false;
+   try{ProjectEdits.stage(new JSONObject()
+     .put("id","qa-bin-edit3")
+     .put("files",new JSONObject().put("index.html","<html></html>")),
+     new JSONObject().put("nope.txt",JSONObject.NULL));}
+   catch(Exception e){stillRejects=true;}
+   check(stillRejects,"deleting a path that exists nowhere is still rejected");
   }
   /*
    * read_file 返回的内容每行带「12: 」这样的行号前缀。

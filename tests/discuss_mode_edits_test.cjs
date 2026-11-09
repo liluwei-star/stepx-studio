@@ -39,8 +39,12 @@ ok('降级路径写在正文里的 files 也算改动',
 ok('写回分支用的是 writeMode',
   /if\(result!=null&&baseline!=null&&!writeMode\.isEmpty\(\)\)\{/.test(main),
   '还在用 editMode，只讨论模式下整段写回被跳过');
+/*
+ * 自动应用只看 writeMode —— 但中间会插别的语句（比如删完文件顺手回收磁盘），
+ * 所以不能要求 replaceProject 紧贴着 if。只要求：这个 if 里确实调了 replaceProject。
+ */
 ok('自动应用只看 writeMode',
-  /if\(writeMode\.equals\("auto"\)\)\{replaceProject\(updated\);/.test(main));
+  /if\(writeMode\.equals\("auto"\)\)\{[\s\S]{0,800}?replaceProject\(updated\);/.test(main));
 ok('提示里说明为什么冒出待审查',
   /if\(editMode\.isEmpty\(\)\)baseMessage="这一轮是「只讨论」/.test(main));
 

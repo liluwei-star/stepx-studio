@@ -105,15 +105,23 @@ var NeoCloud = (() => {
   const key=ref||path;
   const size=await n.cloudSize(id,key);
   const CH=1024*1024;
-  const parts=[];
+  /*
+   * 先按已知大小一次性分配，边读边填。
+   *
+   * <p>原来是先把每块推进 parts 数组、最后再 new 一个 Uint8Array 拼起来 ——
+   * 83 MB 的模型在同一时刻有两份（parts 里一份、拼出来一份），
+   * 峰值一百六十多兆，手机的 JS 堆扛不住。
+   * 大小从一开始就是知道的（cloudSize），没有任何理由分两次分配。
+   */
+  const out=new Uint8Array(size);
+  let at=0;
   for(let i=0;i<size;i+=CH){
    const b64=await n.cloudRead(id,key,i,Math.min(CH,size-i));
-   parts.push(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));
+   const part=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
+   out.set(part,at);
+   at+=part.length;
   }
-  const total=parts.reduce((s,p)=>s+p.length,0);
-  const out=new Uint8Array(total);let at=0;
-  for(const p of parts){out.set(p,at);at+=p.length}
-  return out;
+  return at===size?out:out.subarray(0,at);
  };
  const decode=e=>e.encoding==='base64'?Uint8Array.from(atob(e.content),c=>c.charCodeAt(0)):new TextEncoder().encode(e.content);
  function base64(b){let s='';for(let i=0;i<b.length;i+=16384)s+=String.fromCharCode(...b.subarray(i,i+16384));return btoa(s)}
@@ -133,8 +141,20 @@ var NeoCloud = (() => {
  const bytes=async r=>{
    const len=+r.headers.get('content-length');
    if(len>FILE)throw Error('单文件超过 '+Math.round(FILE/1048576)+' MB，同步未完成');
-   let reader=r.body.getReader(),chunks=[],n=0;
-   try{for(;;){const x=await reader.read();if(x.done)break;n+=x.value.length;if(n>FILE)throw Error('单文件超过 '+Math.round(FILE/1048576)+' MB，同步未完成');chunks.push(x.value)}}finally{reader.cancel().catch(()=>{})}
+   /*
+    * 有 content-length 就一次分配到位，边读边写 —— 不留 chunks 数组。
+    *
+    * <p>只有拿到长度时才能这么做；拿不到（分块传输）才退回「先攒后拼」，
+    * 那条路会同时持有两份，所以上限守得更紧一点。
+    */
+   let reader=r.body.getReader(),n=0;
+   let buf=Number.isFinite(len)&&len>0?new Uint8Array(len):null;
+   let chunks=buf?null:[];
+   try{for(;;){const x=await reader.read();if(x.done)break;n+=x.value.length;if(n>FILE)throw Error('单文件超过 '+Math.round(FILE/1048576)+' MB，同步未完成');
+    if(buf){if(n>buf.length)throw Error('响应长度与声明不符');buf.set(x.value,n-x.value.length);}
+    else chunks.push(x.value);
+   }}finally{reader.cancel().catch(()=>{})}
+   if(buf)return n===buf.length?buf:buf.subarray(0,n);
    const b=new Uint8Array(n);let at=0;for(const c of chunks){b.set(c,at);at+=c.length}return b};
 
  /*

@@ -69,6 +69,38 @@ public class JSONObject {
 
   public Iterator<String> keys() { return map.keySet().iterator(); }
 
+  /**
+   * 与 Android 一致：键不存在或为 null 时返回默认值。
+   *
+   * <p>Android 的 org.json 里没有 {@code optInt}，但被测代码
+   * （DevAgent 的上下文裁剪）用它读组长度和标记位 —— 桌面替身必须补上，
+   * 否则测试编译不过，就等于这条路径根本没被测到。
+   */
+  public int optInt(String name, int fallback) {
+    Object v = map.get(name);
+    if (v == null || v == NULL) return fallback;
+    try { return Integer.parseInt(String.valueOf(v)); } catch (Exception e) { return fallback; }
+  }
+
+  public int optInt(String name) { return optInt(name, 0); }
+
+  public boolean optBoolean(String name) { return optBoolean(name, false); }
+
+  public long optLong(String name, long fallback) {
+    Object v = map.get(name);
+    if (v == null || v == NULL) return fallback;
+    try { return Long.parseLong(String.valueOf(v)); } catch (Exception e) { return fallback; }
+  }
+
+  public long optLong(String name) { return optLong(name, 0L); }
+
+  public boolean optBoolean(String name, boolean fallback) {
+    Object v = map.get(name);
+    if (v == null || v == NULL) return fallback;
+    String s = String.valueOf(v);
+    return "true".equals(s) || "1".equals(s);
+  }
+
   public String optString(String name) { return optString(name, ""); }
 
   public String optString(String name, String fallback) {
@@ -97,6 +129,17 @@ public class JSONObject {
     Object v = map.get(name);
     if (!(v instanceof JSONArray)) throw new IllegalArgumentException("不是数组：" + name);
     return (JSONArray) v;
+  }
+
+  /**
+   * 与 Android 一致：键不存在或不是数组时返回 null。
+   *
+   * <p>DevAgent 判断一条 assistant 消息是不是「工具调用消息」时，
+   * 要先看 OpenAI 路径的 tool_calls 字段在不在 —— 没有这个方法就测不了。
+   */
+  public JSONArray optJSONArray(String name) {
+    Object v = map.get(name);
+    return v instanceof JSONArray ? (JSONArray) v : null;
   }
 
   @Override public String toString() {

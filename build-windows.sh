@@ -35,7 +35,9 @@ if echo "$REPO" | grep -qP '[^\x00-\x7F]'; then
   rm -rf "$SHADOW"; mkdir -p "$SHADOW"
   echo "  [路径] 仓库含非 ASCII 字符，构建副本 -> $SHADOW"
   # 排除构建产物与版本库，只同步构建所需内容
-  for item in AndroidManifest.xml runtime-manifest.xml build.sh build-runtime.sh \
+  # build-windows.sh 自己也要带上：tests/api_level_test.cjs 会读它来核对
+  # 「d8 --min-api 24 + 没开脱糖」这条前提，影子目录里没有就会直接红。
+  for item in AndroidManifest.xml runtime-manifest.xml build.sh build-runtime.sh build-windows.sh \
               prepare-local-ai.py res runtime-res assets src shared-src runtime-src vendor tests; do
     [ -e "$REPO/$item" ] && cp -r "$REPO/$item" "$SHADOW/"
   done

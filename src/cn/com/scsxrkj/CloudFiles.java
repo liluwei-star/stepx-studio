@@ -67,10 +67,98 @@ final class CloudFiles {
  static byte[] bytes(File filesDir,JSONObject e)throws Exception{if(isRef(e))return readBig(filesDir,e.getString(REF_MARK));return bytes(e);}
 
  /**
-  * 为一个大文件生成存储名（路径的 SHA-256 前 16 位）。
+  * 为一个大文件生成存储名。
+  *
+  * <p><b>为什么不能只用路径：</b>大文件都放在同一个目录 {@code project-files/}，
+  * 是<b>所有项目共用</b>的。而项目内路径在不同项目里会重名 ——
+  * 两个项目都有 {@code assets/model.onnx}，如果只用路径算哈希，
+  * 两个项目算出同一个文件名，后写的把先写的覆盖掉。
+  *
+  * <p><b>那会发生什么：</b>项目 A 的模型被项目 B 的模型顶掉，
+  * A 里显示着 20 片分片、实际文件却是 B 的内容 ——
+  * 症状是「素材体检说齐了，装上去就是识别不了」，
+  * 而且没有任何报错，只是内容不对。
+  *
+  * <p><b>所以名字里必须带上项目 id：</b>同一个项目里路径唯一，
+  * 不同项目天然分开。
+  *
+  * @param projectId 项目 id；为空时退化成只用路径（兼容没有项目上下文的调用）
+  * @param path      项目内相对路径
+  * @return 存储文件名，形如 {@code <项目id>-<路径哈希16位>.bin}
+  */
+ static String bigName(String projectId,String path)throws Exception{
+  String scope=projectId==null?"":projectId;
+  return hash((scope+"/"+path).getBytes(StandardCharsets.UTF_8)).substring(0,16)+"-"+
+         hash(path.getBytes(StandardCharsets.UTF_8)).substring(0,8)+".bin";
+ }
+
+ /**
+  * 按内容给一个大文件定名（内容寻址）。
+  *
+  * <p><b>为什么必须按内容定名：</b>大文件都放在同一个目录
+  * {@code project-files/}，是<b>所有项目共用</b>的，文件名就是唯一的身份。
+  * 只要名字不是由内容唯一决定的，就一定会出事：
+  *
+  * <ul>
+  *   <li><b>跨项目覆盖</b> —— 两个项目都有 {@code assets/model.onnx}，
+  *       只用路径定名会算出同一个文件名，后写的把先写的覆盖掉。
+  *       症状是「素材体检说齐了，装上去就是识别不了」，
+  *       而且没有任何报错，只是内容不对。</li>
+  *   <li><b>同项目旧内容残留</b> —— 路径没变、内容变了，
+  *       名字却不变。{@code externalizeBinaries} 看到文件已存在就跳过写入，
+  *       结果磁盘上留着旧内容，{@code bigHashes} 却记了新内容的哈希 ——
+  *       哈希对不上，同步时会被判成「两边都改了」。</li>
+  * </ul>
+  *
+  * <p><b>内容寻址把这一类问题整个消掉：</b>
+  * <ul>
+  *   <li>内容不同 → 哈希不同 → 绝不会撞名；</li>
+  *   <li>内容相同 → 名字相同 → 天然复用一份磁盘空间；</li>
+  *   <li>改名不用搬文件 —— 名字跟路径无关；</li>
+  *   <li>旧内容变成没人引用的孤儿，由 {@code gcBigFiles} 统一回收。</li>
+  * </ul>
+  *
+  * <p>取 SHA-256 的前 32 位十六进制（128 bit）：碰撞概率低到可以忽略，
+  * 而文件名短一些，路径拼接时不容易超长。
+  *
+  * @param content 文件内容
+  * @return 存储文件名，形如 {@code <32位十六进制>.bin}
+  */
+ static String bigNameFor(byte[] content)throws Exception{
+  return hash(content).substring(0,32)+".bin";
+ }
+
+ /**
+  * 按内容给一个大文件定名（流式版本）。
+  *
+  * <p>大文件可能有几百 MB，不该整份读进内存再算哈希。
+  * 边写边算，名字在写完之后才知道 —— 所以先写临时文件，
+  * 拿到哈希后改名。
+  *
+  * @param filesDir 应用私有目录
+  * @param raw      文件内容
+  * @return 存储好的引用对象 {@code {"ref":..., "sha256":..., "size":...}}
+  */
+ static JSONObject writeBig(File filesDir,byte[] raw)throws Exception{
+  String name=bigNameFor(raw);
+  File f=new File(bigDir(filesDir),name);
+  if(!f.isFile()){
+   try(java.io.FileOutputStream out=new java.io.FileOutputStream(f)){out.write(raw);}
+  }
+  return new JSONObject().put(REF_MARK,name).put("sha256",hash(raw)).put("size",raw.length);
+ }
+
+ /**
+  * 为一个大文件生成存储名（没有项目上下文时用）。
+  *
+  * <p><b>为什么不建议用这个：</b>它不区分项目，多个项目之间会互相覆盖。
+  * 只有确实拿不到项目 id 的地方才能用（比如猜引用名的兜底查找）。
+  *
   * @param path 项目内相对路径
   */
- static String bigName(String path)throws Exception{return hash(path.getBytes(StandardCharsets.UTF_8)).substring(0,16)+".bin";}
+ static String bigName(String path)throws Exception{
+  return hash(path.getBytes(StandardCharsets.UTF_8)).substring(0,16)+".bin";
+ }
 
  /**
   * 把条目集合还原成「路径 → 文字内容」。
@@ -296,8 +384,7 @@ final class CloudFiles {
   }
   byte[] raw=bytes(e);
   if(raw.length>BIG_THRESHOLD){
-   String name=bigName(n);
-   JSONObject stored=writeBig(filesDir,name,raw);
+   JSONObject stored=writeBig(filesDir,raw);
    b.put(n,stored.getString(REF_MARK));
    h.put(n,stored.getString("sha256"));
   }else (e.getString("encoding").equals("utf8")?f:b).put(n,e.getString("content"));
@@ -331,13 +418,9 @@ final class CloudFiles {
    if(v.isEmpty()||v.endsWith(".bin"))continue;
    byte[] raw;
    try{raw=Base64.decode(v,Base64.DEFAULT);}catch(Exception e){continue;}
-   String name=bigName(n);
-   File bigFile=new File(bigDir(filesDir),name);
-   if(!bigFile.isFile()){
-    try(java.io.FileOutputStream out=new java.io.FileOutputStream(bigFile)){out.write(raw);}
-   }
-   bins.put(n,name);
-   hashes.put(n,hash(raw));
+   JSONObject stored=writeBig(filesDir,raw);
+   bins.put(n,stored.getString(REF_MARK));
+   hashes.put(n,stored.getString("sha256"));
    moved+=raw.length;
   }
   return moved;
@@ -386,9 +469,26 @@ static void snapshot(JSONObject p,java.util.Set<String> changed,String source)th
    else delta.put(n,JSONObject.NULL);
   }
  }
+ /*
+  * 二进制文件也要进存档 —— 只存文本等于「恢复」是假的。
+  *
+  * <p>图片、字体、模型权重都在 binaryFiles 这张表里，内容在 project-files 目录。
+  * 以前存档只拍 files，于是：删掉一张图 → 引用没了 → gcBigFiles 把磁盘上的
+  * .bin 也删了 → 点「恢复上一版」，文本回来了，图永远回不来了。
+  *
+  * <p>现在按内容寻址，同一份内容可能被多个项目共用，所以恢复时只要把引用
+  * 指回去就行，不需要复制磁盘内容。
+  */
+ JSONObject curBins=p.optJSONObject("binaryFiles"),bins=new JSONObject();
+ if(curBins!=null)for(java.util.Iterator<String> it=curBins.keys();it.hasNext();){
+  String n=it.next();
+  bins.put(n,curBins.optString(n,""));
+ }
  // 这一份新存档：跟老的合并后统一裁剪
  JSONArray newest=new JSONArray();
- newest.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("delta",true).put("source",source==null?"auto":source));
+ newest.put(new JSONObject().put("time",System.currentTimeMillis())
+   .put("files",delta).put("bins",bins).put("delta",true)
+   .put("source",source==null?"auto":source));
  p.put("snapshots",trimSnapshots(old,newest));
 }
  /**

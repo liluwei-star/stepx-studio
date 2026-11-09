@@ -106,7 +106,9 @@ console.log('\n── 二进制引用和大文件也要跟着清 ─────
 {
   check(/binaryFiles/.test(saveSeg) || /binaryFiles/.test(delHelper),
     'the delete path also drops the binary reference');
-  check(/gcBigFiles\(merged\)/.test(saveSeg),
+  // gcBigFiles 现在不带参数：它拿整个 state 算存活集合（内容寻址后同一份 .bin
+  // 可能被多个项目共用），参数那个版本是个用不到的形参。
+  check(/gcBigFiles\(\)/.test(saveSeg),
     'unreferenced big files are reclaimed after a delete');
 }
 

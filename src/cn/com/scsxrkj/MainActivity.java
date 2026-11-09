@@ -550,6 +550,19 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      File note=new File(new File(getFilesDir(),"project-notes"),safeNoteName(id)+".md");
      if(note.exists()&&!note.delete())cleanup=false;
     }catch(Exception ignored){}
+    /*
+     * 项目独占的大文件也要回收。
+     *
+     * <p>模型权重、图片这些的真实内容在 {@code project-files/} 里，
+     * 项目对象删掉之后，那些 {@code .bin} 就再没有任何引用指向它们 ——
+     * 但磁盘上的文件还在。一个带语音模型的项目就是几十兆，
+     * 用户点「彻底删除」以为腾出空间了，实际一点没少。
+     *
+     * <p>不能在这里直接按项目里的引用名挨个删：内容寻址之后，
+     * 同一份内容可能还被别的项目、或者某个存档引用着。
+     * 统一交给 gcBigFiles 判断，它拿整个 state 算存活集合。
+     */
+    try{gcBigFiles();}catch(Exception ignored){}
    }
    sendState();event("projectChanged",new JSONObject().put("action",action).put("id",id));toast(cleanup?(action.equals("trash")?"已移到最近删除，可随时恢复":action.equals("restore")?"项目已恢复":"项目已彻底删除"):"项目已删除，但部分工作台构建缓存未能清理");
   }catch(Exception e){toast("操作未完成："+safeError(e));sendState();}}).setNegativeButton("取消",null).show();
@@ -905,7 +918,22 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      JSONObject sf=s.optJSONObject("files");
      JSONArray list=new JSONArray();
      if(sf!=null)for(java.util.Iterator<String> it=sf.keys();it.hasNext();)list.put(it.next());
-     meta.put(new JSONObject().put("time",s.optLong("time")).put("files",list).put("delta",s.optBoolean("delta",false)));
+     /*
+      * 二进制清单也要带上，否则前端算「这次变了什么」时看不到图。
+      *
+      * <p>存档里的引用表（bins / binaryFiles）是一张「路径 → 引用名」的表，
+      * 前端只需要知道<b>存档当时有哪些二进制路径</b>，不需要引用名本身。
+      * 所以这里只压成路径数组，体积跟上面那份文本清单差不多。
+      *
+      * <p>不带的话，「变更」视图会把项目里所有图片都列成「新增」——
+      * 用户看到一屏的图，以为 AI 往里塞了一堆东西。
+      */
+     JSONObject sb0=s.optJSONObject("bins");
+     if(sb0==null)sb0=s.optJSONObject("binaryFiles");
+     JSONArray binList=new JSONArray();
+     if(sb0!=null)for(java.util.Iterator<String> it=sb0.keys();it.hasNext();)binList.put(it.next());
+     meta.put(new JSONObject().put("time",s.optLong("time")).put("files",list)
+       .put("binNames",binList).put("delta",s.optBoolean("delta",false)));
     }
     pr.put("snapshots",meta);
     pr.put("snapshotsAreMeta",true);
@@ -1939,7 +1967,27 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
        :"本轮工具调用达到了轮数上限，已做的改动仍然写回，但这一轮没做完。");
      }
      JSONObject target=byId("projects",projectId);JSONObject updated=applyAiChanges(target,baseline,changes,edit);if(research!=null){JSONArray refs=new JSONArray(research.getJSONArray("references").toString());for(int ri=0;ri<refs.length();ri++){refs.getJSONObject(ri).remove("code");refs.getJSONObject(ri).remove("licenseText");}updated.put("sourceReferences",refs);}
-     if(writeMode.equals("auto")){replaceProject(updated);edit.put("status",ProjectEdits.same(baseline,updated.getJSONObject("files"))?"unchanged":"applied");}
+     if(writeMode.equals("auto")){
+      replaceProject(updated);
+      /*
+       * 「有没有变化」不能只看文本表。
+       *
+       * <p>只删掉一张图时 files 一个字都没变，光看它就会报「这一轮没有改动文件」，
+       * 而用户明明看到图从文件树里消失了 —— 提示和事实对不上。
+       */
+      boolean filesSame=ProjectEdits.same(baseline,updated.getJSONObject("files"));
+      boolean binsSame=String.valueOf(target.opt("binaryFiles"))
+        .equals(String.valueOf(updated.opt("binaryFiles")));
+      edit.put("status",filesSame&&binsSame?"unchanged":"applied");
+      /*
+       * AI 这一轮可能删了图片 / 模型权重。
+       *
+       * <p>只有文本表能判断「什么都没变」，二进制表删了也不会体现在 files 上。
+       * 这里补一次回收，磁盘上的 .bin 才不会一直留着 ——
+       * 用户以为删干净了，其实几 MB 还在手机里。
+       */
+      gcBigFiles();
+     }
      else edit.put("status","review");
      /*
       * files/base 在抢救路径上已经填过就不要覆盖。
@@ -2079,7 +2127,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    * <p>必须在 replaceProject 之后调：gcBigFiles 是拿 state 里所有项目
    * 的引用算出「谁还活着」，项目已经换进 state 了，它才知道这份引用确实断了。
    */
-  if(del!=null&&del.length()>0)gcBigFiles(merged);
+  if(del!=null&&del.length()>0)gcBigFiles();
  }
 
  /**
@@ -2154,7 +2202,21 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
        */
       JSONObject note=new JSONObject();
       JSONObject changed=applyAiChanges(p,q.getJSONObject("base"),q.getJSONObject("files"),note);
+      /*
+       * 恢复存档时带上来的二进制引用，整张表换回去。
+       *
+       * <p>内容寻址之后引用就是文件名，换表不搬磁盘内容，
+       * 相同内容自动共用同一份 .bin。
+       */
+      JSONObject bins=q.optJSONObject("bins");
+      if(bins!=null)changed.put("binaryFiles",new JSONObject(bins.toString()));
       try{replaceProject(changed);saveState();}catch(Exception e){replaceProject(before);throw e;}
+      /*
+       * 恢复存档可能让某些 .bin 失去最后一个引用，也可能让另一些重新被引用。
+       * 换表之后回收一次，磁盘不会留下孤儿；仍在存档里引用的也不会被误删
+       * —— gcBigFiles 已经把存档里的引用算成活引用。
+       */
+      if(bins!=null)gcBigFiles();
       JSONArray heldBack=note.optJSONArray("heldBack");
       if(heldBack!=null&&heldBack.length()>0)toast(note.optString("salvage",""));}
   sendState();event("filesApplied",q.getString("id"));
@@ -2169,7 +2231,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  void restoreProjectFiles(JSONObject q)throws Exception{
   if(cloud.busy())throw new Exception("请先结束同步");
   JSONObject current=byId("projects",q.getString("id"));if(current.optBoolean("cloudSource")){
-   if(projectChangeBusy())throw new Exception("请先结束当前任务");if(!ProjectEdits.same(current.getJSONObject("files"),q.getJSONObject("base")))throw new Exception("文件已变化，请重新打开快照");JSONArray snaps=current.optJSONArray("snapshots");if(snaps==null||snaps.length()==0)throw new Exception("没有快照");JSONObject last=snaps.getJSONObject(snaps.length()-1),changed=new JSONObject(current.toString());CloudFiles.snapshot(changed);changed.put("files",new JSONObject(last.getJSONObject("files").toString()));if(last.has("binaryFiles"))changed.put("binaryFiles",new JSONObject(last.getJSONObject("binaryFiles").toString()));CloudFiles.entries(changed);
+   if(projectChangeBusy())throw new Exception("请先结束当前任务");if(!ProjectEdits.same(current.getJSONObject("files"),q.getJSONObject("base")))throw new Exception("文件已变化，请重新打开快照");JSONArray snaps=current.optJSONArray("snapshots");if(snaps==null||snaps.length()==0)throw new Exception("没有快照");JSONObject last=snaps.getJSONObject(snaps.length()-1),changed=new JSONObject(current.toString());CloudFiles.snapshot(changed);changed.put("files",new JSONObject(last.getJSONObject("files").toString()));/*
+      * 二进制引用：新存档写在 bins 里，老存档写在 binaryFiles 里，两种都认。
+      * 只认一种的话，云端项目点「恢复」会把图丢掉。
+      */
+     JSONObject lastBins=last.optJSONObject("bins");
+     if(lastBins==null)lastBins=last.optJSONObject("binaryFiles");
+     if(lastBins!=null)changed.put("binaryFiles",new JSONObject(lastBins.toString()));CloudFiles.entries(changed);
    /*
     * 只备份「要改的那一个项目」，不备份整个 state。
     *
@@ -2225,6 +2293,16 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     files=new JSONObject(snapFiles.toString());
     Iterator<String> it=p.getJSONObject("files").keys();while(it.hasNext()){String n=it.next();if(!files.has(n))files.put(n,JSONObject.NULL);}
    }
+   /*
+    * 二进制引用也要一起回滚。
+    *
+    * <p>否则删掉一张图、删掉一段模型权重之后点「恢复」，
+    * 页面文本回来了、引用没了 —— 文件树里那一条是空的，
+    * 预览打不开，构建也带不上。而且磁盘上的 .bin 早已被 gc 回收，
+    * 等于永久丢了。
+    */
+   JSONObject snapBins=last.optJSONObject("bins");
+   if(snapBins!=null)q.put("bins",new JSONObject(snapBins.toString()));
    q.put("files",files).put("source","恢复存档");applyProjectFiles(q);
  }
  /** 打开项目关联的官方 Studio 页面。链接必须是 studio.stepx.com 下的具体项目页。 */
@@ -2337,11 +2415,27 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   worker.execute(()->{
    try{
     final File out=buildProjectZip(real);
+    final List<String> miss=new ArrayList<>(zipMissing);
     runOnUiThread(()->{
      exportFile=out;
      exportBytes=null;
      exportName=name;
-     savePicker("application/zip");
+     if(miss.isEmpty()){savePicker("application/zip");return;}
+     // 有大文件在磁盘上找不到了。先说明清楚，再让用户决定要不要继续存 ——
+     // 先弹「另存为」再在后面弹对话框，对话框会被系统文件选择器盖住，
+     // 用户回来时只看到一句「文件已导出」，根本不知道备份是残缺的。
+     StringBuilder sb=new StringBuilder("有 ").append(miss.size()).append(" 个大文件在磁盘上找不到了，这次备份里不会有它们：\n");
+     for(int i=0;i<Math.min(8,miss.size());i++)sb.append("· ").append(miss.get(i)).append("\n");
+     if(miss.size()>8)sb.append("· 其余 ").append(miss.size()-8).append(" 个\n");
+     sb.append("\n这些文件可能已被清理或缓存回收，需要重新导入原始文件。\n\n仍要保存这份不完整的备份吗？");
+     new android.app.AlertDialog.Builder(this).setTitle("备份不完整").setMessage(sb.toString())
+      .setPositiveButton("仍然保存",(d,w)->savePicker("application/zip"))
+      .setNegativeButton("取消",(d,w)->{
+       // 用户不要了：临时 ZIP 删掉，别在缓存里留个半成品
+       if(exportFile!=null&&exportFile.getParentFile()!=null
+          &&"exports".equals(exportFile.getParentFile().getName()))exportFile.delete();
+       exportFile=null;
+      }).show();
     });
    }catch(Exception e){
     final String m=safeError(e);
@@ -2350,6 +2444,8 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   });
  }
 
+ /** 上一次导出时发现缺失的大文件路径（导出后清空）。 */
+ private List<String> zipMissing=new ArrayList<>();
  /**
   * 把一个项目写成 ZIP 文件。
   *
@@ -2364,6 +2460,8 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   File out=new File(dir,"project.zip");
   JSONObject files=p.optJSONObject("files"),bins=p.optJSONObject("binaryFiles");
   File bigDir=new File(getFilesDir(),"project-files");
+  // 缺失的大文件要记下来，最后告诉用户，不能悄悄写个空文件进去
+  List<String> missing=new ArrayList<>();
   try(ZipOutputStream z=new ZipOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(out),65536))){
    if(files!=null)for(Iterator<String>it=files.keys();it.hasNext();){
     String n=it.next();
@@ -2375,19 +2473,25 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     String n=it.next();
     if(files!=null&&files.has(n))continue;
     String ref=bins.getString(n);
-    z.putNextEntry(new ZipEntry(n));
     if(ref.endsWith(".bin")){
      File src=new File(bigDir,ref);
-     if(src.isFile())try(java.io.FileInputStream in=new java.io.FileInputStream(src)){
+     // 磁盘上没有这个大文件 —— 跳过这个条目。
+     // 以前是先 putNextEntry 再判断，文件不在时就留下一个 0 字节的空条目，
+     // 备份看起来成功，实际内容已经丢了，而且用户毫无察觉。
+     if(!src.isFile()){missing.add(n);continue;}
+     z.putNextEntry(new ZipEntry(n));
+     try(java.io.FileInputStream in=new java.io.FileInputStream(src)){
       byte[] buf=new byte[65536];int r;
       while((r=in.read(buf))!=-1)z.write(buf,0,r);
      }
     }else{
+     z.putNextEntry(new ZipEntry(n));
      z.write(android.util.Base64.decode(ref,android.util.Base64.DEFAULT));
     }
     z.closeEntry();
    }
   }
+  zipMissing=missing;
   return out;
  }
 
@@ -2564,16 +2668,16 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    files.remove(from);
   }else if(bins!=null&&bins.has(from)){
    String ref=bins.getString(from);
-   if(ref.endsWith(".bin")){
-    String newRef=moveBigFile(ref,CloudFiles.bigName(to));
-    bins.put(to,newRef);
-    if(hashes!=null){
-     String h=hashes.optString(from,"");
-     hashes.remove(from);
-     if(!h.isEmpty())hashes.put(to,h);
-    }
-   }else{
-    bins.put(to,ref);
+   /*
+    * 大文件按内容定名，所以改名<b>不需要动磁盘上的文件</b> ——
+    * 引用名只跟内容有关，跟路径无关。
+    * 原来这里要搬文件，搬的过程中一旦失败就留下「引用指向不存在的文件」。
+    */
+   bins.put(to,ref);
+   if(hashes!=null){
+    String h=hashes.optString(from,"");
+    hashes.remove(from);
+    if(!h.isEmpty())hashes.put(to,h);
    }
    bins.remove(from);
   }else throw new Exception("文件不存在");
@@ -2602,16 +2706,14 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    files.put(to,files.getString(from));
   }else if(bins!=null&&bins.has(from)){
    String ref=bins.getString(from);
-   if(ref.endsWith(".bin")){
-    // 大文件：磁盘上复制一份，新路径对应新的引用名
-    String newRef=copyBigFile(ref,CloudFiles.bigName(to));
-    bins.put(to,newRef);
-    if(hashes!=null){
-     String h=hashes.optString(from,"");
-     if(!h.isEmpty())hashes.put(to,h);
-    }
-   }else{
-    bins.put(to,ref);
+   /*
+    * 大文件按内容定名：复制到新路径，<b>内容一样就是同一个引用</b>，
+    * 不用在磁盘上再存一份 —— 两个路径指向同一个内容哈希文件。
+    */
+   bins.put(to,ref);
+   if(hashes!=null){
+    String h=hashes.optString(from,"");
+    if(!h.isEmpty())hashes.put(to,h);
    }
   }else throw new Exception("文件不存在");
 
@@ -2624,8 +2726,9 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  /**
   * 删除项目里的一个文件。
   *
-  * <p>大文件如果已经没有别的路径引用它，连磁盘上那份一起删掉，
-  * 不然删了文件还占着空间。
+  * <p>磁盘上的大文件不在这里删，交给 {@code gcBigFiles} ——
+  * 内容寻址之后同一份内容可能被多个项目共用，只看本项目会误删别人的文件；
+  * 存档里引用的也还在用，删了就再也恢复不出来。
   *
   * @param pid  项目 id
   * @param path 路径
@@ -2638,16 +2741,26 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   if(files.has(path)){
    files.remove(path);
   }else if(bins!=null&&bins.has(path)){
-   String ref=bins.getString(path);
    bins.remove(path);
    if(hashes!=null)hashes.remove(path);
-   if(ref.endsWith(".bin")&&!stillReferenced(bins,ref)){
-    try{new File(new File(getFilesDir(),"project-files"),ref).delete();}catch(Exception ignored){}
-   }
   }else throw new Exception("文件不存在");
 
   proj.put("updated",System.currentTimeMillis());
   upsert("projects",proj);
+  /*
+   * 磁盘上的 .bin 交给 gcBigFiles 统一回收，这里不自己删。
+   *
+   * <p><b>为什么不能就地删：</b>大文件现在按<b>内容</b>定名，
+   * 同一份内容可能被多个项目引用（两个项目都有一样的图标，就是同一个 .bin）。
+   * 只看本项目还在不在用，删 A 项目的图会把 B 项目那份一起删掉 ——
+   * B 那边看起来文件还在，打开是坏的，而且没有任何报错。
+   *
+   * <p>而且存档里也存着引用：删了文件还想「恢复上一版」就恢复不出来。
+   *
+   * <p>gcBigFiles 是拿<b>整个 state 的所有项目 + 所有存档</b>算存活集合的，
+   * 只有真正没人引用了才删。
+   */
+  gcBigFiles();
   sendState();
   toast("已删除");
  }
@@ -2706,7 +2819,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    sendState();
 
    // 大文件删除后，磁盘上那些已经没人引用的文件要收尾
-   if(act.equals("delete")&&usedDir[0]!=null)gcBigFiles(proj);
+   if(act.equals("delete")&&usedDir[0]!=null)gcBigFiles();
 
    toast(fail==0?("已完成 "+ok+" 个文件"):("完成 "+ok+" 个，失败 "+fail+" 个："+firstErr));
   }catch(Exception e){toast("批量操作失败："+safeError(e));}
@@ -2968,8 +3081,9 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   * 从项目对象里移除一个文件，不存盘。
   *
   * <p>大文件删掉引用后，磁盘上的内容不在这里删 —— 得等整批做完，
-  * 因为可能有别的路径还引用着同一个 {@code .bin}。
-  * 这里只把「这个项目用过大文件目录」记下来，交给 {@link #gcBigFiles} 统一收尾。
+  * 而且内容寻址之后，同一份内容可能被别的项目、或者存档本身引用着 ——
+  * 只看本项目会误删。所以这里只做个标记，交给 {@link #gcBigFiles} 统一收尾，
+  * 它拿整个 state 的所有项目和所有存档算存活集合。
   *
   * @param proj    项目对象
   * @param path    要删的文件
@@ -3016,17 +3130,13 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   }
   if(bins!=null&&bins.has(from)){
    String ref=bins.getString(from);
-   if(ref.endsWith(".bin")){
-    String newRef=moveBigFile(ref,CloudFiles.bigName(to));
-    bins.put(to,newRef);
-    usedDir[0]=newRef;
-    if(hashes!=null){
-     String h=hashes.optString(from,"");
-     hashes.remove(from);
-     if(!h.isEmpty())hashes.put(to,h);
-    }
-   }else{
-    bins.put(to,ref);
+   // 大文件按内容定名，移动路径不需要动磁盘上的文件
+   bins.put(to,ref);
+   usedDir[0]=ref;
+   if(hashes!=null){
+    String h=hashes.optString(from,"");
+    hashes.remove(from);
+    if(!h.isEmpty())hashes.put(to,h);
    }
    bins.remove(from);
    return;
@@ -3041,19 +3151,57 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   * 那 4 MB 的模型、几十张图会一直躺在手机里占空间 ——
   * 用户以为删了，其实没删。
   */
- void gcBigFiles(JSONObject proj){
+ void gcBigFiles(){
   try{
    File dir=new File(getFilesDir(),"project-files");
    if(!dir.isDirectory())return;
    // 整个 state 里所有项目引用的 .bin 名集合
    java.util.HashSet<String>live=new java.util.HashSet<>();
+   /*
+    * 除了「本地项目」，还要数「最近删除」里的项目。
+    *
+    * <p>移到最近删除只是把项目对象从 projects 挪进 projectTrash，
+    * 源码、快照、大文件引用全都还在 —— 这是它跟「彻底删除」的唯一区别。
+    * 只数 projects 的话，用户刚把项目移到回收站，
+    * 下一次任何一次回收（删个文件、AI 改一轮、恢复存档）就会把它的大文件当孤儿删掉，
+    * 而界面上还写着「随时可恢复」。恢复回来一看，模型和图片全没了。
+    */
+   java.util.ArrayList<JSONObject> all=new java.util.ArrayList<>();
    JSONArray prs=state.getJSONArray("projects");
-   for(int i=0;i<prs.length();i++){
-    JSONObject b=prs.getJSONObject(i).optJSONObject("binaryFiles");
-    if(b==null)continue;
-    for(java.util.Iterator<String> k=b.keys();k.hasNext();){
+   for(int i=0;i<prs.length();i++)all.add(prs.getJSONObject(i));
+   JSONArray trash=state.optJSONArray("projectTrash");
+   if(trash!=null)for(int i=0;i<trash.length();i++){
+    JSONObject box=trash.optJSONObject(i);
+    JSONObject pr=box==null?null:box.optJSONObject("project");
+    if(pr!=null)all.add(pr);
+   }
+   for(JSONObject pr:all){
+    JSONObject b=pr.optJSONObject("binaryFiles");
+    if(b!=null)for(java.util.Iterator<String> k=b.keys();k.hasNext();){
      String v=b.optString(k.next(),"");
      if(v.endsWith(".bin"))live.add(v);
+    }
+    /*
+     * 存档里引用的也要算活的。
+     *
+     * <p>只数当前项目文件表的话：删掉一张图 → 引用从 binaryFiles 消失 →
+     * 这里立刻把 .bin 删了 → 用户想点「恢复上一版」时，存档里的引用还在，
+     * 磁盘上的内容已经没了。存档就成了一张空头支票。
+     */
+    JSONArray snaps=pr.optJSONArray("snapshots");
+    if(snaps!=null)for(int si=0;si<snaps.length();si++){
+     JSONObject s=snaps.optJSONObject(si);
+     if(s==null)continue;
+     JSONObject sb=s.optJSONObject("bins");
+     if(sb!=null)for(java.util.Iterator<String> k=sb.keys();k.hasNext();){
+      String v=sb.optString(k.next(),"");
+      if(v.endsWith(".bin"))live.add(v);
+     }
+     JSONObject sb2=s.optJSONObject("binaryFiles");
+     if(sb2!=null)for(java.util.Iterator<String> k=sb2.keys();k.hasNext();){
+      String v=sb2.optString(k.next(),"");
+      if(v.endsWith(".bin"))live.add(v);
+     }
     }
    }
    File[] fa=dir.listFiles();
@@ -3114,26 +3262,6 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   }
  }
 
- /** 磁盘上的大文件改名。跨分区改名失败时退化成复制+删除。 */
- String moveBigFile(String oldRef,String newRef)throws Exception{
-  if(oldRef.equals(newRef))return newRef;
-  File dir=new File(getFilesDir(),"project-files");
-  File src=new File(dir,oldRef),dst=new File(dir,newRef);
-  if(!src.isFile())throw new Exception("大文件缺失："+oldRef);
-  if(!src.renameTo(dst)){copyFile(src,dst);if(!src.delete())throw new Exception("旧文件删不掉");}
-  return newRef;
- }
-
- /** 磁盘上的大文件复制一份。 */
- String copyBigFile(String oldRef,String newRef)throws Exception{
-  if(oldRef.equals(newRef))throw new Exception("引用名重复");
-  File dir=new File(getFilesDir(),"project-files");
-  File src=new File(dir,oldRef),dst=new File(dir,newRef);
-  if(!src.isFile())throw new Exception("大文件缺失："+oldRef);
-  copyFile(src,dst);
-  return newRef;
- }
-
  /** 分块复制文件，不把整个文件读进内存。 */
  void copyFile(File src,File dst)throws Exception{
   try(java.io.FileInputStream in=new java.io.FileInputStream(src);
@@ -3141,15 +3269,6 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    byte[]b=new byte[65536];int n;
    while((n=in.read(b))!=-1)out.write(b,0,n);
   }
- }
-
- /** 判断一个 .bin 引用还有没有别的路径在用。 */
- boolean stillReferenced(JSONObject bins,String ref)throws Exception{
-  if(bins==null)return false;
-  for(java.util.Iterator<String>it=bins.keys();it.hasNext();){
-   if(ref.equals(bins.optString(it.next(),"")))return true;
-  }
-  return false;
  }
 
  /**
@@ -3557,11 +3676,22 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   }
 
   if(total>CloudFiles.BIG_THRESHOLD){
-   // 大文件：已读的部分先写盘，然后继续流式写完
-   String ref=CloudFiles.bigName(name);
-   File f=new File(CloudFiles.bigDir(getFilesDir()),ref);
+   /*
+    * 大文件：已读的部分先写盘，然后继续流式写完。
+    *
+    * <p><b>为什么先写临时文件、算完哈希再改名：</b>
+    * 大文件按<b>内容</b>定名（见 {@code CloudFiles.bigNameFor}），
+    * 而名字要等整个文件读完才算得出来。所以先落到临时名，
+    * 读完、拿到内容哈希之后再改成正式名。
+    *
+    * <p><b>顺带解决的另一个问题：</b>以前这里用「路径哈希」当名字，
+    * 而大文件目录是所有项目共用的 —— 两个项目都有 {@code assets/model.onnx} 时
+    * 会算出同一个文件名，后写的把先写的覆盖掉。
+    * 症状是「素材体检说分片都齐了，装上去就是认不出来」，而且不报错。
+    */
+   File tmp=new File(CloudFiles.bigDir(getFilesDir()),"tmp-"+UUID.randomUUID().toString()+".part");
    java.security.MessageDigest md=java.security.MessageDigest.getInstance("SHA-256");
-   try(java.io.FileOutputStream out=new java.io.FileOutputStream(f)){
+   try(java.io.FileOutputStream out=new java.io.FileOutputStream(tmp)){
     byte[] done=head.toByteArray();
     out.write(done);
     md.update(done);
@@ -3570,7 +3700,7 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
      total+=n;
      if(total>MAX_IMPORT_FILE){
       out.close();
-      f.delete();   // 半成品留着没用，删掉
+      tmp.delete();   // 半成品留着没用，删掉
       throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
      }
      md.update(buf,0,n);
@@ -3579,9 +3709,18 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    }
    StringBuilder s=new StringBuilder();
    for(byte v:md.digest())s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));
+   String sha=s.toString();
+   String ref=sha.substring(0,32)+".bin";
+   File target=new File(CloudFiles.bigDir(getFilesDir()),ref);
+   // 内容相同就已经有一份了 —— 名字是内容哈希，同名即同内容，不必再存一遍
+   if(!target.isFile()){
+    if(!tmp.renameTo(target))tmp.delete();
+   }else{
+    tmp.delete();
+   }
    entries.put(name,new JSONObject()
      .put(CloudFiles.REF_MARK,ref)
-     .put("sha256",s.toString())
+     .put("sha256",sha)
      .put("size",total));
    return total;
   }

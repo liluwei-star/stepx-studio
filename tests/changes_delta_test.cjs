@@ -181,5 +181,62 @@ console.log('\n── 差量存档不能把没动过的文件算成新增 ──
     'the changed file is still detected');
 }
 
+console.log('\n── 场景：二进制引用存在 bins 下（新存档格式）────────');
+{
+  const snapFiles = { 'index.html': 'same' };
+  const current = { 'index.html': 'same' };
+  const p = {
+    id: 'p4', updated: 1,
+    files: { 'index.html': 'same' },
+    binaryFiles: { 'assets/a.png': 'aaa.bin', 'assets/b.png': 'bbb.bin' },
+    snapshots: [{ time: 1, delta: true, added: [], bins: { 'assets/a.png': 'aaa.bin' } }],
+  };
+  const computeDiff = makeComputeDiff({ 0: snapFiles }, current);
+  const d = computeDiff(p);
+  /*
+   * 新存档把二进制引用存在 bins 下。只读 binaryFiles 的话 oldBins 恒为空，
+   * 已有的图会被全部列成「新增」—— 变更视图看着像项目被塞满了图。
+   */
+  check(d.addedBinary.length === 1 && d.addedBinary[0] === 'assets/b.png',
+    'only the genuinely new binary is listed (got: ' + JSON.stringify(d.addedBinary) + ')');
+}
+
+console.log('\n── 场景：老存档把二进制引用存在 binaryFiles 下 ────────');
+{
+  const snapFiles = { 'index.html': 'same' };
+  const current = { 'index.html': 'same' };
+  const p = {
+    id: 'p5', updated: 1,
+    files: { 'index.html': 'same' },
+    binaryFiles: { 'assets/a.png': 'aaa.bin' },
+    snapshots: [{ time: 1, delta: true, added: [], binaryFiles: { 'assets/a.png': 'aaa.bin' } }],
+  };
+  const computeDiff = makeComputeDiff({ 0: snapFiles }, current);
+  const d = computeDiff(p);
+  check(d.addedBinary.length === 0,
+    'an unchanged binary is not reported as new (got: ' + JSON.stringify(d.addedBinary) + ')');
+}
+
+console.log('\n── 场景：原生推给前端的瘦身快照（只有路径名）────────');
+{
+  const snapFiles = { 'index.html': 'same' };
+  const current = { 'index.html': 'same' };
+  const p = {
+    id: 'p6', updated: 1,
+    files: { 'index.html': 'same' },
+    binaryFiles: { 'assets/a.png': 'aaa.bin', 'assets/b.png': 'bbb.bin' },
+    snapshots: [{ time: 1, delta: true, added: [], binNames: ['assets/a.png'] }],
+  };
+  const computeDiff = makeComputeDiff({ 0: snapFiles }, current);
+  const d = computeDiff(p);
+  /*
+   * 原生推给前端的快照是瘦身版：只有「存档当时有哪些二进制路径」，
+   * 没有引用名。这条不通的话，用户在真机上看到的就是
+   * 「所有图都是新增」。
+   */
+  check(d.addedBinary.length === 1 && d.addedBinary[0] === 'assets/b.png',
+    'only the genuinely new binary is listed (got: ' + JSON.stringify(d.addedBinary) + ')');
+}
+
 console.log('\n通过 ' + pass + ' / ' + (pass + fail));
 process.exit(fail ? 1 : 0);

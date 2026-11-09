@@ -67,8 +67,7 @@ final class CloudProjects {
    String ref=e.getString("ref");
    if(ref.endsWith(".bin"))continue;          // 已经是项目里的引用
    byte[] raw=staging.read(projectId,ref);
-   String name=CloudFiles.bigName(n);
-   JSONObject stored=CloudFiles.writeBig(a.getFilesDir(),name,raw);
+   JSONObject stored=CloudFiles.writeBig(a.getFilesDir(),raw);
    // 条目改成项目内引用，sha256 一并更新为原生算出来的值
    e.put("ref",stored.getString("ref"));
    if(e.isNull("sha256"))e.put("sha256",stored.getString("sha256"));

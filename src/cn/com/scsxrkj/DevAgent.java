@@ -190,9 +190,9 @@ final class DevAgent {
   }
   s=s.replaceAll("(?s)<think[^>]*>.*?</think>","").trim();
   try{return new JSONObject(s);}catch(Exception ignore){}
-  int from=indexOfJsonStart(s);
+  int from=JsonScan.indexOfJsonStart(s);
   if(from<0)throw new Exception("回复里没有可解析的 JSON");
-  int to=endOfJsonObject(s,from);
+  int to=JsonScan.endOfJsonObject(s,from);
   if(to<0)throw new Exception("回复里的 JSON 不完整");
   return new JSONObject(s.substring(from,to+1));
  }
@@ -636,14 +636,25 @@ final class DevAgent {
      Object raw=m.opt("content");
      if(raw instanceof JSONArray){
       JSONArray arr=(JSONArray)raw;
-      if(arr.length()>0){
-       boolean allToolUse=true;
-       for(int c=0;c<arr.length();c++){
-        JSONObject blk=arr.optJSONObject(c);
-        if(blk==null||!"tool_use".equals(blk.optString("type",""))){allToolUse=false;break;}
-       }
-       if(allToolUse)isToolCall=true;
+      /*
+       * 判据是「含有 tool_use 块」，**不是「全是 tool_use 块」**。
+       *
+       * <p><b>为什么不能要求全是：</b>Anthropic 路径下，模型这一轮说的正文
+       * 会作为 text 块和 tool_use 块放进同一个 content 数组
+       * （模型说过的话不能从历史里消失）。只要模型开了口，
+       * 原来那个「全是 tool_use」的判据就判 false，这条消息被当成普通消息，
+       * 它后面的 tool_result 就被留成了独立的一组。
+       *
+       * <p>一旦裁剪切在组与组之间，被丢的正好可能是 tool_use，
+       * 留下的却是它的 tool_result —— 协议不完整，服务端直接 400，
+       * 整个 AGENT 循环当场崩掉。而报错完全看不出跟裁剪有关。
+       */
+      boolean hasToolUse=false;
+      for(int c=0;c<arr.length();c++){
+       JSONObject blk=arr.optJSONObject(c);
+       if(blk!=null&&"tool_use".equals(blk.optString("type",""))){hasToolUse=true;break;}
       }
+      if(hasToolUse)isToolCall=true;
      }
     }
    }
@@ -659,12 +670,25 @@ final class DevAgent {
       Object raw=k.opt("content");
       if(raw instanceof JSONArray){
        JSONArray arr=(JSONArray)raw;
-       boolean toolResult=arr.length()>0;
+       /*
+        * 同样只看「含有 tool_result 块」，不要求「全是」。
+        *
+        * <p><b>为什么必须放宽：</b>appendAutoCheck() 会把「自动验证编译」的
+        * 结果以 text 块的形态追加进这条 user 消息的 content 数组
+        * （Anthropic 要求 tool_result 块必须在最前面，text 只能跟在后面，
+        * 所以不能另起一条 user 消息）。
+        *
+        * <p>于是这条消息的 content 数组变成了「tool_result + text」，
+        * 原来那个「全是 tool_result」的判据就判 false —— 分组在这里断开，
+        * tool_result 后面配对的 assistant tool_use 被切成另一组。
+        * 裁剪一按组丢，就可能只丢一半，服务端 400。
+        */
+       boolean hasToolResult=false;
        for(int c=0;c<arr.length();c++){
         JSONObject blk=arr.optJSONObject(c);
-        if(blk==null||!"tool_result".equals(blk.optString("type",""))){toolResult=false;break;}
+        if(blk!=null&&"tool_result".equals(blk.optString("type",""))){hasToolResult=true;break;}
        }
-       if(toolResult){end++;continue;}
+       if(hasToolResult){end++;continue;}
       }
      }
      break;
@@ -737,9 +761,94 @@ final class DevAgent {
    int st=grp.optInt("start",0),en=grp.optInt("end",0);
    for(int j=st;j<en;j++)list.add(messages.opt(j));
   }
+  /*
+   * 合并相邻的同角色消息。
+   *
+   * <p><b>为什么必须做：</b>上面那条「已移除」说明是 role:"user"，
+   * 而它紧跟的第 0 组正是用户的原始提问 —— 也是 role:"user"。
+   * 于是裁剪结果里出现了<b>连续两条 user 消息</b>。
+   *
+   * <p>Anthropic 官方接口会把连续的同角色回合并成一条（文档里明写了
+   * "Consecutive user or assistant turns will be combined"），
+   * 但严格交替的路径 —— Bedrock、部分中转代理 —— 会直接返回
+   * 400 "messages: roles must alternate between user and assistant"。
+   *
+   * <p>不能指望服务端合并：合并发生在服务端，而请求是我们发的。
+   * 自己合并掉，两条路都能过。
+   */
+  mergeAdjacentSameRole(list);
   JSONArray out=new JSONArray();
   for(int li=0;li<list.size();li++)out.put(list.get(li));
   return out;
+ }
+
+ /**
+  * 把相邻的同角色消息合并成一条，并保证 Anthropic 的块顺序合法。
+  *
+  * <p><b>只合并「纯文字」的消息：</b>带 tool_use / tool_result 的消息
+  * 一律不动。原因是这类消息的身份靠 id 绑定 ——
+  * assistant 的 tool_use 对应下一个 user 消息里的 tool_result，
+  * OpenAI 的 tool 消息对应 tool_call_id。合并任何一条都会丢掉配对关系，
+  * 服务端直接 400。这比多一条 user 消息严重得多。
+  *
+  * <p><b>不修改原对象：</b>messages 是还在用的历史，裁剪结果必须是新对象。
+  * 原地改会把改动渗回原始历史，下一轮再裁一次就叠加一层。
+  *
+  * <p><b>合并后重排块：</b>Anthropic 要求 user 消息里 tool_result 块
+  * 必须在最前面，text 只能跟在后面。合并时保证这一点。
+  */
+ static void mergeAdjacentSameRole(java.util.ArrayList<Object> list)throws Exception{
+  if(list==null||list.size()<2)return;
+  for(int i=list.size()-1;i>0;i--){
+   Object curObj=list.get(i),prevObj=list.get(i-1);
+   if(!(curObj instanceof JSONObject)||!(prevObj instanceof JSONObject))continue;
+   JSONObject cur=(JSONObject)curObj,prev=(JSONObject)prevObj;
+   String role=prev.optString("role","");
+   /* 只处理 user / assistant，tool 消息一条对一个 id，绝不能合并 */
+   if(!"user".equals(role)&&!"assistant".equals(role))continue;
+   if(!role.equals(cur.optString("role","")))continue;
+   /*
+    * 带工具块的消息一律不合并。
+    *
+    * <p>两条理由：Anthropic 的 tool_use / tool_result 靠 id 与配对消息绑定，
+    * 合并就断了；OpenAI 的 assistant 消息带 tool_calls 字段，
+    * 合并会把 tool_calls 弄丢（内容被换成纯文字，模型看不到自己调过工具）。
+    */
+   if(hasToolBlocks(prev)||hasToolBlocks(cur))continue;
+   if(prev.has("tool_calls")||cur.has("tool_calls"))continue;
+   Object pc=prev.opt("content"),cc=cur.opt("content");
+   if(pc instanceof String&&cc instanceof String){
+    /* 新建对象，不改原来的那条 —— 裁剪结果必须是新对象 */
+    list.set(i-1,new JSONObject().put("role",role)
+     .put("content",((String)pc)+"\n\n"+((String)cc)));
+    list.remove(i);
+    continue;
+   }
+   /* 一边是数组一边是文字：数组里只有 text 块时才合并（已排除工具块） */
+   if(pc instanceof JSONArray&&cc instanceof String){
+    JSONArray src=(JSONArray)pc;
+    JSONArray merged=new JSONArray();
+    for(int k=0;k<src.length();k++)merged.put(src.opt(k));
+    merged.put(new JSONObject().put("type","text").put("text",cc));
+    list.set(i-1,new JSONObject().put("role",role).put("content",merged));
+    list.remove(i);
+    continue;
+   }
+  }
+ }
+
+ static boolean hasToolBlocks(JSONObject m)throws Exception{
+  if(m==null)return false;
+  Object raw=m.opt("content");
+  if(!(raw instanceof JSONArray))return false;
+  JSONArray arr=(JSONArray)raw;
+  for(int i=0;i<arr.length();i++){
+   JSONObject blk=arr.optJSONObject(i);
+   if(blk==null)continue;
+   String type=blk.optString("type","");
+   if("tool_use".equals(type)||"tool_result".equals(type))return true;
+  }
+  return false;
  }
 
  /**
@@ -888,12 +997,12 @@ final class DevAgent {
   if(text==null)return false;
   String s=text.trim();
   if(s.isEmpty())return false;
-  int from=indexOfJsonStart(s);
+  int from=JsonScan.indexOfJsonStart(s);
   if(from<0)return false;
   /* JSON 前面有说明文字 → 更像是在讲代码，不像是要发协议 */
   if(from>0)return false;
   /* 整个文本必须就是这个 JSON 对象（允许尾部空白） */
-  int to=endOfJsonObject(s,from);
+  int to=JsonScan.endOfJsonObject(s,from);
   if(to>=0)return s.substring(to+1).trim().isEmpty();
   /*
    * 配不上对（JSON 写坏了）：只要整段只有一个 {，
@@ -916,41 +1025,6 @@ final class DevAgent {
   return body.has("tools")||body.has("files")||body.has("answer");
  }
 
- static int indexOfJsonStart(String s){
-  for(int i=0;i<s.length();i++){
-   char c=s.charAt(i);
-   if(c=='{'||c=='[')return i;
-  }
-  return -1;
- }
-
- /**
-  * 从 from 处开始，按括号配对算出 JSON 对象的结束下标。
-  *
-  * <p>要跳过字符串里的括号 —— JSON 里可以写 {"text":"有个 } 符号"}，
-  * 不跳过的话会数错配对，提前截断成半个 JSON。
-  * 也要处理转义引号。
-  */
- static int endOfJsonObject(String s,int from){
-  boolean inString=false,escaped=false;
-  int depth=0;
-  for(int i=from;i<s.length();i++){
-   char c=s.charAt(i);
-   if(inString){
-    if(escaped){escaped=false;continue;}
-    if(c=='\\'){escaped=true;continue;}
-    if(c=='"')inString=false;
-    continue;
-   }
-   if(c=='"'){inString=true;continue;}
-   if(c=='{'||c=='['){depth++;}
-   else if(c=='}'||c==']'){
-    depth--;
-    if(depth==0)return i;
-   }
-  }
-  return -1;
- }
  /** 系统提示词里项目概览的占位符。每轮请求前替换成最新概览。 */
  static final String OVERVIEW_SLOT="\n\n<!--PROJECT_OVERVIEW-->";
 
