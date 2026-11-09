@@ -31,42 +31,18 @@ final class LocalDevTools {
   JSONObject out=new JSONObject();
   if(project==null)return out;
   JSONObject files=project.optJSONObject("files");
-  out.put("files",shallowStrings(files));
+  out.put("files",CloudFiles.shallowStrings(files));
   /* 工具会读的其余字段：标识、名字、云端标记、二进制索引、美术资源 */
   for(String k:new String[]{"id","name","cloudSource","binaryFiles","artAssets"}){
    if(!project.has(k))continue;
    Object v=project.opt(k);
-   out.put(k,v instanceof JSONObject?shallowStrings((JSONObject)v)
+   out.put(k,v instanceof JSONObject?CloudFiles.shallowStrings((JSONObject)v)
     :v instanceof JSONArray?new JSONArray(v.toString()):v);
   }
   return out;
  }
 
- /**
-  * 浅拷贝一张「路径 → 文本」表：只复制键值映射，不复制字符串本体。
-  *
-  * <p><b>为什么不能用 {@code new JSONObject(src.toString())}：</b>
-  * 那会先把整张表序列化成一个巨大的 JSON 字符串，再解析回来。
-  * 一个几十 MB 的工程，files 本身就有几十 MB，
-  * 于是内存里同时存在「原表 + 这份完整字符串 + 新表」三份，
-  * 峰值直接翻倍。手机上堆顶掉的表现是「点发送之后应用直接退出」，
-  * 而这条路径跟 AI 逻辑毫无关系，极难联想到是拷贝。
-  *
-  * <p>浅拷贝只建一张新的映射表，值仍然指向原来那些 String 对象。
-  * String 是不可变的，两边共享同一个实例完全安全 ——
-  * 谁要改内容，都是往表里 put 一个新 String，不会影响另一张表。
-  *
-  * <p>额外内存基本只有「键 → 引用」这部分，和内容大小无关。
-  */
- static JSONObject shallowStrings(JSONObject src)throws Exception{
-  JSONObject out=new JSONObject();
-  if(src==null)return out;
-  for(java.util.Iterator<String> it=src.keys();it.hasNext();){
-   String k=it.next();
-   out.put(k,src.optString(k,""));
-  }
-  return out;
- }
+
 
  LocalDevTools(MainActivity a,JSONObject project)throws Exception{
   this.a=a;
@@ -75,7 +51,7 @@ final class LocalDevTools {
    * 都只取 original.optJSONObject("files")。
    */
   JSONObject files=project==null?null:project.optJSONObject("files");
-  original=project==null?null:new JSONObject().put("files",shallowStrings(files));
+  original=project==null?null:new JSONObject().put("files",CloudFiles.shallowStrings(files));
   /* 工作副本是精简副本：与调用方隔离，但不把快照和历史也抄一遍 */
   staged=project==null?null:leanCopy(project);
  }

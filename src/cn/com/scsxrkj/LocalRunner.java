@@ -40,9 +40,9 @@ final class LocalRunner {
   * 共享同一个不可变实例完全安全。
   */
  project=new JSONObject()
-   .put("files",LocalDevTools.shallowStrings(source.getJSONObject("files")))
+   .put("files",CloudFiles.shallowStrings(source.getJSONObject("files")))
    .put("binaryFiles",source.optJSONObject("binaryFiles")==null?new JSONObject()
-     :LocalDevTools.shallowStrings(source.getJSONObject("binaryFiles")));
+     :CloudFiles.shallowStrings(source.getJSONObject("binaryFiles")));
   // 大文件的哈希索引必须一起带过来。
   // 不带的话 CloudFiles.entries() 校验 .bin 引用时找不到 sha256，
   // 直接抛「大文件缺少哈希」，整个构造失败 ——

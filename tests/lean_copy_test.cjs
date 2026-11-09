@@ -59,7 +59,17 @@ const tools = read('src/cn/com/scsxrkj/LocalDevTools.java');
 const runner = read('src/cn/com/scsxrkj/LocalRunner.java');
 
 const mLean = grabMethod(tools, 'static JSONObject leanCopy(JSONObject project)throws Exception{');
-const mShallow = grabMethod(tools, 'static JSONObject shallowStrings(JSONObject src)throws Exception{');
+/*
+ * 浅拷贝方法已经从 LocalDevTools 挪到 CloudFiles ——
+ * 因为美术资源那条路（ArtManager）也要用同一份实现，
+ * 放在 LocalDevTools 里会让 ArtManager 反过来依赖工具循环的类。
+ */
+const cloudFilesSrc = read('src/cn/com/scsxrkj/CloudFiles.java');
+const mShallow = grabMethod(cloudFilesSrc, 'static JSONObject shallowStrings(JSONObject src)throws Exception{');
+const mCopyProject = grabMethod(cloudFilesSrc, 'static JSONObject copyProject(JSONObject src)throws Exception{');
+
+const jLean = mLean.replace(/CloudFiles\.shallowStrings\(/g, 'shallowStrings(');
+const jCopyProject = mCopyProject.replace(/CloudFiles\.shallowStrings\(/g, 'shallowStrings(');
 
 const HARNESS = `
 package cn.com.scsxrkj;
@@ -75,7 +85,9 @@ public class LeanProbe {
 
 ${mShallow}
 
-${mLean}
+${jCopyProject}
+
+${jLean}
 
     public static void main(String[] a) throws Exception {
         StringBuilder out = new StringBuilder();
@@ -133,6 +145,33 @@ ${mLean}
         // ── 不该搬过来的字段 ──
         out.append("N_SNAPSHOTS=").append(copy.has("snapshots")).append('\\n');
         out.append("N_ID=").append(copy.optString("id")).append('\\n');
+
+        /*
+         * copyProject：用来「改动前先留一份、失败了整份换回去」的副本。
+         * 它要保留全部字段（回滚时一个都不能少），但对字符串不复制，
+         * 对容器必须深拷贝（否则往副本里加东西会串到原对象）。
+         *
+         * 这一段用 println 而不是拼换行符 —— 这段代码本身长在 JS 模板里，
+         * 再套一层 Java 的转义很容易写错，直接一行一个输出最省事。
+         */
+        JSONObject full = new JSONObject()
+                .put("id", "p1")
+                .put("files", files)
+                .put("binaryFiles", bins)
+                .put("artAssets", art)
+                .put("snapshots", new JSONArray().put(new JSONObject().put("t", 1)))
+                .put("history", new JSONArray())
+                .put("updated", 123);
+        JSONObject rollback = copyProject(full);
+        rollback.getJSONObject("files").put("index.html", "被改了");
+        System.out.println("CP_ORIG_INDEX=" + full.getJSONObject("files").optString("index.html"));
+        System.out.println("CP_SHARED_BIG=" + (files.optString("big.js") == rollback.getJSONObject("files").optString("big.js")));
+        rollback.getJSONArray("snapshots").put(new JSONObject().put("t", 2));
+        System.out.println("CP_SNAP_ORIG=" + full.getJSONArray("snapshots").length());
+        System.out.println("CP_SNAP_COPY=" + rollback.getJSONArray("snapshots").length());
+        System.out.println("CP_ALL_FIELDS=" + (rollback.has("history") && rollback.has("snapshots") && rollback.has("updated")));
+        System.out.println("CP_ID=" + rollback.optString("id"));
+        System.out.println("CP_NULL=" + copyProject(null).length());
 
         System.out.print(out);
     }
@@ -200,12 +239,22 @@ console.log('\n── 实现要点：不许再整表序列化 ──────
 ok('LocalDevTools 里没有 files.toString() 深拷贝',
   !/new JSONObject\(files *== *null *\? *"\{\}" *: *files\.toString\(\)\)/.test(tools),
   '还在用整表序列化');
-ok('提供了 shallowStrings', /static JSONObject shallowStrings\(JSONObject src\)/.test(tools), '没有浅拷贝方法');
-ok('leanCopy 用的是浅拷贝', /out\.put\("files", *shallowStrings\(files\)\)/.test(tools), 'leanCopy 还在深拷贝');
-ok('original 也用浅拷贝', /original=.*put\("files", *shallowStrings\(files\)\)/.test(tools), 'original 还在深拷贝');
+ok('CloudFiles 提供了 shallowStrings', /static JSONObject shallowStrings\(JSONObject src\)/.test(cloudFilesSrc), '没有浅拷贝方法');
+ok('CloudFiles 提供了 copyProject', /static JSONObject copyProject\(JSONObject src\)/.test(cloudFilesSrc), '没有可回滚副本方法');
+ok('leanCopy 用的是浅拷贝', /out\.put\("files", *CloudFiles\.shallowStrings\(files\)\)/.test(tools), 'leanCopy 还在深拷贝');
+ok('original 也用浅拷贝', /original=.*put\("files", *CloudFiles\.shallowStrings\(files\)\)/.test(tools), 'original 还在深拷贝');
 ok('LocalRunner 也改成了浅拷贝',
-  /LocalDevTools\.shallowStrings\(source\.getJSONObject\("files"\)\)/.test(runner),
+  /CloudFiles\.shallowStrings\(source\.getJSONObject\("files"\)\)/.test(runner),
   'LocalRunner 还在 new JSONObject(files.toString())');
+
+console.log('\n── copyProject：回滚副本要全字段但不抄字符串 ────');
+ok('改副本不动原文', v.CP_ORIG_INDEX === '<h1>hi</h1>', v.CP_ORIG_INDEX);
+ok('大文件字符串仍然共享', v.CP_SHARED_BIG === 'true', '回滚副本把源码又抄了一遍');
+ok('往副本加快照，原文长度不变', v.CP_SNAP_ORIG === '1', v.CP_SNAP_ORIG);
+ok('副本里确实加上了', v.CP_SNAP_COPY === '2', v.CP_SNAP_COPY);
+ok('回滚副本保留全部字段', v.CP_ALL_FIELDS === 'true', '少字段会让回滚丢数据');
+ok('标识字段也在', v.CP_ID === 'p1', v.CP_ID);
+ok('null 输入返回空对象', v.CP_NULL === '0', v.CP_NULL);
 
 console.log('\n----------------------------------------------------');
 console.log((fail === 0 ? 'ALL PASS' : 'FAILED ' + fail) + ' (lean_copy_test)  ' + pass + ' 项');

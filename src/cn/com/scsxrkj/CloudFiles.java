@@ -308,6 +308,58 @@ final class CloudFiles {
  static String hash(byte[] b)throws Exception{StringBuilder s=new StringBuilder();for(byte v:MessageDigest.getInstance("SHA-256").digest(b))s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));return s.toString();}
  static byte[] bytes(JSONObject e)throws Exception{String c=e.getString("content"),encoding=e.getString("encoding");if(encoding.equals("utf8"))return c.getBytes(StandardCharsets.UTF_8);if(encoding.equals("base64"))return Base64.decode(c,Base64.NO_WRAP);throw new Exception("不支持的文件编码");}
  static JSONObject entry(String content,String encoding)throws Exception{JSONObject e=new JSONObject().put("content",content).put("encoding",encoding);return e.put("sha256",hash(bytes(e)));}
+ /**
+  * 浅拷贝一张「路径 → 文本」表：只复制键值映射，不复制字符串本体。
+  *
+  * <p><b>为什么不能用 {@code new JSONObject(src.toString())}：</b>
+  * 那会先把整张表序列化成一个巨大的 JSON 字符串，再解析回来。
+  * 一个几十 MB 的工程，files 本身就有几十 MB，
+  * 于是内存里同时存在「原表 + 这份完整字符串 + 新表」三份，峰值直接翻倍。
+  * 手机上的表现是「点某个按钮之后应用直接退出」，
+  * 而这条路径跟具体功能无关，极难联想到是拷贝。
+  *
+  * <p>浅拷贝只建一张新的映射表，值仍然指向原来那些 String 对象。
+  * String 是不可变的，两边共享同一个实例完全安全 ——
+  * 谁要改内容，都是往表里 put 一个新 String，不会影响另一张表。
+  * 额外内存基本只有「键 → 引用」这部分，和内容大小无关。
+  */
+ static JSONObject shallowStrings(JSONObject src)throws Exception{
+  JSONObject out=new JSONObject();
+  if(src==null)return out;
+  for(Iterator<String> it=src.keys();it.hasNext();){
+   String k=it.next();
+   out.put(k,src.optString(k,""));
+  }
+  return out;
+ }
+
+ /**
+  * 造一份可以拿来回滚的项目副本：容器结构深拷贝，字符串内容共享。
+  *
+  * <p>用途是「改动之前先留一份，失败了整份换回去」。
+  * 这种副本必须和原对象完全隔离 —— 否则回滚回去的还是被改过的数据。
+  * 但也不需要把每个字符串都复制一遍：
+  * <ul>
+  *   <li>文本表 / 二进制索引的值都是 String，浅拷贝即可（String 不可变）；</li>
+  *   <li>数组和嵌套对象是结构，必须深拷贝，否则往副本里加东西会串到原对象。</li>
+  * </ul>
+  *
+  * <p>这样一份几十 MB 工程的副本，额外内存只有结构本身，
+  * 不会因为「再抄一遍全部源码」把应用顶掉。
+  */
+ static JSONObject copyProject(JSONObject src)throws Exception{
+  JSONObject out=new JSONObject();
+  if(src==null)return out;
+  for(Iterator<String> it=src.keys();it.hasNext();){
+   String k=it.next();
+   Object v=src.opt(k);
+   if(v instanceof JSONObject)out.put(k,shallowStrings((JSONObject)v));
+   else if(v instanceof JSONArray)out.put(k,new JSONArray(v.toString()));
+   else out.put(k,v);
+  }
+  return out;
+ }
+
  static JSONObject entries(JSONObject p)throws Exception{return entries(p,null);}
 
  /**
