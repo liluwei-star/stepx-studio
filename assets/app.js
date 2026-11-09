@@ -93,6 +93,25 @@ let S=JSON.parse(Neo.read()),page='projects',projectId=null,file='index.html',ch
 let editBuffer={};
 
 /*
+ * 待删除的文件路径。
+ *
+ * <p><b>为什么需要单独一份清单：</b>原生保存项目是<b>合并</b>语义 ——
+ * 收到 files 清单后把内容 put 进去，清单里没提到的路径<b>保持原样</b>。
+ * 这是必须的：状态快照里 files 只带「路径 → 字节数」不带内容，
+ * 前端每次保存只能发「我改过的那些」，要是按快照全量覆盖，
+ * 别的文件内容就被清空了。
+ *
+ * <p>但合并语义有个漏洞：<b>删文件传不过去</b>。
+ * 前端把路径从清单里删掉再保存，原生看到的只是「这个路径不在清单里」，
+ * 于是原样保留 —— 界面里文件没了，磁盘上还在，重开又冒出来，
+ * 编译时它还在参与构建，同步上云也照样带着它。
+ *
+ * <p>所以删除必须显式表达：这里攒一份「用户明确删掉」的路径，
+ * 保存时随 payload 一起发过去，原生据此真正删除。
+ */
+let pendingDeletes=[],pendingDeleteProject=null;
+
+/*
  * 取项目的文本文件内容。
  *
  * 为什么不能直接用 p.files[n]：
@@ -208,10 +227,37 @@ function saveProject(){
   for(const n in editBuffer){
     if(editBuffer[n]!==undefined)payload.files[n]=editBuffer[n];
   }
+  /*
+   * 把待删清单一起发过去。
+   *
+   * <p>只在有东西要删时才带这个字段，省得每次保存都多一个键。
+   * 原生那边按「合并 + 显式删除」处理，缺这个键就是纯合并。
+   */
+  /*
+   * 待删清单要跟着项目走。
+   *
+   * <p>清单里存的是「路径」，不带项目 id。如果删了 A 项目的 a.js，
+   * 接着切到 B 项目（b.js 名字碰巧一样）再保存，
+   * 这条待删记录会跟着发过去，把 B 项目的 b.js 一起删掉。
+   *
+   * <p>所以发送之前先确认这份清单属于当前项目；不是就丢掉。
+   */
+  if(pendingDeleteProject&&pendingDeleteProject!==p.id)pendingDeletes=[];
+  pendingDeleteProject=p.id;
+  if(pendingDeletes.length){
+    payload.deletedFiles=pendingDeletes.slice();
+    /* 同步清掉本地清单，避免下次保存又发一遍已经删掉的路径。 */
+    for(const n of pendingDeletes){
+      delete p.files[n];
+      delete editBuffer[n];
+    }
+  }
   // 保存失败不能静默，也不能拦住后面的动作 ——
   // 之前构建按钮点了没反应，就是这里抛异常把 send('buildApk') 掐断了。
   try{
     send('project',payload);
+    /* 只有真发出去了才清空 —— 保存失败时清单还得留着，下次重试能删掉。 */
+    pendingDeletes=[];
     if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';
   }catch(e){
     notice('保存失败：'+(e&&e.message||e));
@@ -303,6 +349,8 @@ window.receive=(type,data)=>{
    * 会看到 A 项目里编辑过的内容，一敲键盘还会把它存进 B 项目。
    */
   editBuffer={};
+  /* 换项目后待删清单必须清空 —— 里面存的是上一个项目的路径。 */
+  pendingDeletes=[];pendingDeleteProject=null;
   page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=allFileContents(project());candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId){
   /*
    * 自动应用后清掉编辑暂存 —— 不管用户当前在哪个页面。
@@ -395,16 +443,35 @@ function computeDiff(p, snapIndex){
     /*
      * 差量：值是 null 的表示「存档时刻这个文件还不存在」→ 现在有就是新增。
      * added 名单里的同理（存档时刻之后新建的）。
+     *
+     * <p><b>关键：差量表只记了改动过的文件。</b>
+     * 所以「差量表里没有」不等于「新增」—— 那只说明这次没动过它。
+     *
+     * <p><b>原来的写法把它当成了新增，于是整个反了：</b>
+     * 用户项目里几十个没动过的文件全被列成「新增」，
+     * 真正被改掉的那个文件反倒显示「无修改」。
+     * AI 自己看到的变更和用户看到的变更对不上，审查页也跟着显示错。
+     *
+     * <p>正确做法是<b>先叠回</b>：用存档里的旧内容覆盖当前内容，
+     * 得到「改动前」的完整样子，再拿它跟当前内容比。
+     * 跟 Java 侧 ProjectDiff.against 的差量分支同一套口径。
      */
     const addedLater=(p.snapshots||[])[idx].added||[];
+    /* 改动前的样子：先取当前内容，再被存档里的旧内容覆盖 */
+    const oldFiles={};
+    for(const n of Object.keys(nowFiles))oldFiles[n]=currentContent(p,n);
+    for(const n of Object.keys(snapFiles)){
+      if(snapFiles[n]===null)delete oldFiles[n];
+      else oldFiles[n]=snapFiles[n];
+    }
+    for(const n of addedLater)delete oldFiles[n];
     for(const n of Object.keys(nowFiles)){
-      if(!(n in snapFiles)){added.push(n);continue}
-      if(snapFiles[n]===null||addedLater.includes(n)){added.push(n);continue}
-      if(snapFiles[n]===currentContent(p,n))same++;
+      if(!(n in oldFiles)){added.push(n);continue}
+      if(oldFiles[n]===currentContent(p,n))same++;
       else changed.push(n);
     }
-    for(const n of Object.keys(snapFiles)){
-      if(!(n in nowFiles)&&snapFiles[n]!==null)removed.push(n);
+    for(const n of Object.keys(oldFiles)){
+      if(!(n in nowFiles))removed.push(n);
     }
   }else{
     for(const n of Object.keys(nowFiles)){
@@ -2083,7 +2150,7 @@ case 'fontMinus':codeFont=Math.max(9,codeFont-1);localStorage.setItem('codeFont'
 case 'gotoLine':send('askLine');break;
 case 'doGotoLine':gotoLine(data&&data.line||1);break;
 case 'fmToggle':fileCollapsed[id]=!fileCollapsed[id];filesPage();break;
-case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':flushNow();file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',{id:p.id});break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]=0;editBuffer[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];delete editBuffer[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(currentContent(p,file));editBuffer[file]=undo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'redo':if(redo.length){undo.push(currentContent(p,file));editBuffer[file]=redo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'findCode':{
+case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':flushNow();file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',{id:p.id});break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]=0;editBuffer[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){/* 记进待删清单，原生才知道要把磁盘上的文件真删掉 */if(pendingDeleteProject&&pendingDeleteProject!==p.id)pendingDeletes=[];pendingDeleteProject=p.id;pendingDeletes.push(file);delete p.files[file];delete editBuffer[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(currentContent(p,file));editBuffer[file]=undo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'redo':if(redo.length){undo.push(currentContent(p,file));editBuffer[file]=redo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'findCode':{
   let q=prompt('查找文字');if(!q)break;
   const t=$('#code'),src=t.value;
   /*

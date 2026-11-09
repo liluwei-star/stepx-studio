@@ -2050,10 +2050,77 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     if(v instanceof String)dst.put(n,(String)v);
    }
   }
+  /*
+   * 删除清单：把用户明确删掉的文件从项目里真正去掉。
+   *
+   * <p>上面的合并是<b>只增不减</b>的 —— files 是「路径 → 内容」清单，
+   * 清单里没提到的路径必须保持原样，否则每存一次都会把别的文件清空。
+   * 但这正好让「删文件」失效：前端把路径从清单里删掉再保存，
+   * 原生看到的只是「这个路径不在清单里」，于是<b>原样保留</b>。
+   *
+   * <p>结果就是界面里文件没了、磁盘上还在，重开又冒出来，
+   * 编译时它还在参与构建，同步上云也照样带着它。
+   *
+   * <p>所以删除必须显式表达，不能靠「不在清单里」来推断。
+   */
+  JSONArray del=incoming.optJSONArray("deletedFiles");
+  if(del!=null)applyDeletes(merged,del);
   if(incoming.has("name"))merged.put("name",incoming.optString("name"));
   merged.put("updated",System.currentTimeMillis());
   replaceProject(merged);
   saveState();
+  /*
+   * 删了文件之后顺手回收没人引用的大文件。
+   *
+   * <p>大文件的真实内容在 project-files 目录里，引用（binaryFiles）断了，
+   * 内容就成了孤儿 —— 4 MB 的模型、几十张图会一直躺在手机里占地方，
+   * 用户以为删了，其实没删。
+   *
+   * <p>必须在 replaceProject 之后调：gcBigFiles 是拿 state 里所有项目
+   * 的引用算出「谁还活着」，项目已经换进 state 了，它才知道这份引用确实断了。
+   */
+  if(del!=null&&del.length()>0)gcBigFiles(merged);
+ }
+
+ /**
+  * 把「用户明确删掉的文件」从项目里真正去掉。
+  *
+  * <p>之所以要单独一个方法：删文件这件事的核心难点不是删除本身，
+  * 而是<b>删除意图必须显式传过来</b>。
+  *
+  * <p>原生保存项目是<b>合并</b>语义 —— 收到 files 清单后把内容 put 进去，
+  * 清单里没提到的路径保持原样。这条规则不能破：状态快照里 files 只带
+  * 「路径 → 字节数」不带内容，前端每次保存只能发「我改过的那些」，
+  * 要是按快照全量覆盖，别的文件内容就被清空了。
+  *
+  * <p>但合并语义有个漏洞：<b>删文件传不过去</b>。
+  * 前端把路径从清单里删掉再保存，原生看到的只是「这个路径不在清单里」，
+  * 于是原样保留 —— 界面里文件没了，磁盘上还在，重开又冒出来，
+  * 编译时它还在参与构建，同步上云也照样带着它。
+  *
+  * <p>所以删除必须单独成一条通道：前端攒一份「用户明确删掉」的路径，
+  * 随保存一起发过来，原生据此真正删除。
+  *
+  * <p>二进制文件要一起清。binaryFiles 是另一张表：图片、字体、模型权重
+  * 都在这儿。只删 files 里的条目，binaryFiles 里还留着引用，
+  * 于是用户删掉一张 3 MB 的图，文件树里没了，磁盘上还在 ——
+  * 而且这份「幽灵引用」会一直跟着项目同步上云。
+  * 大文件（.bin）的真实内容在 project-files 目录里，
+  * 引用断了以后由 gcBigFiles 统一回收。
+  *
+  * @param merged 已经合并好新内容的项目对象（就地修改）
+  * @param del    待删路径清单
+  */
+ static void applyDeletes(JSONObject merged,JSONArray del)throws Exception{
+  if(merged==null||del==null)return;
+  JSONObject dst=merged.optJSONObject("files");
+  JSONObject bins=merged.optJSONObject("binaryFiles");
+  for(int i=0;i<del.length();i++){
+   String n=del.optString(i);
+   if(n.length()==0)continue;
+   if(dst!=null)dst.remove(n);
+   if(bins!=null)bins.remove(n);
+  }
  }
 
  /** 用新内容整条替换项目列表里的对应记录（不存盘，由调用方负责）。 */

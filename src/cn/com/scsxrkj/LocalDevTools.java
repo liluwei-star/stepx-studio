@@ -591,21 +591,40 @@ JSONObject call(String name,JSONObject args)throws Exception{
     int end=Math.min(lines.length,start-1+count);
     StringBuilder text=new StringBuilder();
     for(int i=start-1;i<end;i++){text.append(i+1).append(": ").append(lines[i]).append('\n');}
-    out.put("path",path).put("totalLines",lines.length).put("content",text.toString())
-     .put("startLine",start).put("endLine",end).put("returnedLines",end-start+1)
-     /*
-      * 必须明说行号不是内容。
-      *
-      * <p>read_file 的内容每行前面加了「12: 」方便定位，模型最容易犯的错
-      * 就是把它当成文件内容原样写回去 —— 于是项目里每一行多一个行号，
-      * 而这种损坏经常还能编译通过，用户只看到页面多了堆数字。
-      * 写入路径上虽然会自动剥掉，但让模型一开始就别带才是最省事的。
-      */
-     .put("note","每行开头的「行号: 」是定位标记，不是文件内容；写回时不要带上。");
+    /*
+     * 提示要拼成一条，不能分两次 put。
+     *
+     * <p><b>原来这里是两条独立的 put("note", …)：</b>
+     * 一条讲「行号不是内容」，一条讲「后面还有多少行」。
+     * org.json 的 put 同名键是<b>覆盖</b> —— 于是只要读了文件的一部分，
+     * 后那条就把前条整条盖掉了。
+     *
+     * <p>后果很讽刺：模型最爱分段读（文件大，怕撑爆上下文），
+     * 于是<b>越是认真读文件，越拿不到「行号不是内容」这条警告</b> ——
+     * 恰好在最需要的时候把提示丢了。
+     * 而模型最常见的动作恰恰是「读出来 → 改两行 → 整份写回」，
+     * 于是项目里每一行多一个行号，这种损坏经常还能编译通过，
+     * 用户只看到页面多了堆数字，完全联系不到「上次让 AI 改过文件」。
+     *
+     * <p>所以改成把两条提示攒进一个列表，最后一次性 put。
+     */
+    java.util.ArrayList<String> notes=new java.util.ArrayList<>();
+    /*
+     * 必须明说行号不是内容。
+     *
+     * <p>read_file 的内容每行前面加了「12: 」方便定位，模型最容易犯的错
+     * 就是把它当成文件内容原样写回去 —— 于是项目里每一行多一个行号，
+     * 而这种损坏经常还能编译通过，用户只看到页面多了堆数字。
+     * 写入路径上虽然会自动剥掉，但让模型一开始就别带才是最省事的。
+     */
+    notes.add("每行开头的「行号: 」是定位标记，不是文件内容；写回时不要带上。");
     /* 只读到一部分时说明还有多少 —— 模型才知道要不要接着读。 */
     if(end<lines.length)
-     out.put("note","这次只读到第 "+end+" 行，后面还有 "+(lines.length-end)
+     notes.add("这次只读到第 "+end+" 行，后面还有 "+(lines.length-end)
       +" 行。要接着读就传 startLine="+(end+1)+"。");
+    out.put("path",path).put("totalLines",lines.length).put("content",text.toString())
+     .put("startLine",start).put("endLine",end).put("returnedLines",end-start+1);
+    if(!notes.isEmpty())out.put("note",joinNotes(notes));
     break;
    }
    case "search_code":{
@@ -1501,7 +1520,25 @@ JSONObject call(String name,JSONObject args)throws Exception{
   * @param content 模型交回来的内容
   * @return 剥离后的内容；不像行号副本时原样返回
   */
- static String stripLineNumbers(String content){
+ /**
+  * 把多条提示拼成一条。
+  *
+  * <p>用「；」连接而不是换行 —— 提示最终会进模型的上下文，
+  * 一条紧凑的句子比多行好读，也不容易被当成正文。
+  *
+  * @param notes 提示列表
+  * @return 拼好的提示
+  */
+ static String joinNotes(java.util.List<String> notes){
+  StringBuilder s=new StringBuilder();
+  for(int i=0;i<notes.size();i++){
+   if(i>0)s.append("；");
+   s.append(notes.get(i));
+  }
+  return s.toString();
+ }
+
+  static String stripLineNumbers(String content){
   if(content==null||content.isEmpty())return content;
   String[] lines=splitKeepCr(content);
   java.util.regex.Pattern p=STRIP_LINE;

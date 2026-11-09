@@ -2112,6 +2112,35 @@ final class SelfTest {
   */
  static void newChecks(MainActivity a)throws Exception{
   /*
+   * 删文件必须真的删掉。
+   *
+   * <p>原生保存项目是合并语义（只增不减），所以删文件的意图
+   * 必须显式传过去。前端删掉一个文件后把路径攒进 deletedFiles，
+   * 原生据此从 files 和 binaryFiles 两张表里把它去掉。
+   *
+   * <p>以前这个通道根本不存在 —— 前端只是把路径从清单里划掉，
+   * 原生看不到任何删除信息，于是原样保留：界面里文件没了、
+   * 磁盘上还在，重开又冒出来，编译时它还在参与构建。
+   */
+  {
+   JSONObject delProject=new JSONObject()
+    .put("id","qa-delete-files")
+    .put("name","Delete fixture")
+    .put("files",new JSONObject()
+     .put("index.html","<!doctype html><html><body>keep</body></html>")
+     .put("gone.js","console.log(1)")
+     .put("stay.js","console.log(2)"))
+    .put("binaryFiles",new JSONObject().put("gone.png","abc.bin"));
+   JSONArray del=new JSONArray().put("gone.js").put("gone.png");
+   MainActivity.applyDeletes(delProject,del);
+   JSONObject f=delProject.getJSONObject("files");
+   check(!f.has("gone.js"),"deleting a file really removes it from the project");
+   check(f.has("stay.js"),"files that were not deleted stay untouched");
+   check(f.has("index.html"),"the entry file is never removed by a delete list");
+   check(!delProject.getJSONObject("binaryFiles").has("gone.png"),
+    "the binary reference is dropped together with the file");
+  }
+  /*
    * read_file 返回的内容每行带「12: 」这样的行号前缀。
    *
    * 那是给人看的定位信息，不是文件内容。模型最常见的动作是
