@@ -46,16 +46,24 @@ final class LocalRunner {
   *
   * <p>判据很简单：入口 HTML 里有没有引用 src/ 下的 .ts/.tsx/.jsx。
   * 有就是源码工程，得编译；没有就是产物，直接跑。
+  *
+  * <p><b>扩展名后面可能跟查询串或锚点。</b>
+  * 原来要求扩展名后面紧跟引号，于是
+  * {@code src="/src/main.tsx?t=1699999999"} 这种写法匹配不上 ——
+  * 缓存打散、{@code ?raw} / {@code ?url} 后缀、开发时 hot reload 加时间戳，
+  * 都会带问号。判成「已经构建好的产物」之后就不编译了，
+  * 直接拿 index.html 去跑，页面一片空白，而界面不会给任何原因。
+  * 正则改成允许扩展名后面跟 {@code ?} 或 {@code #} 打头的尾巴。
   */
- boolean isStaticBuild(){
+  boolean isStaticBuild(){
   try{
    JSONObject f=project.optJSONObject("files");
    if(f==null)return false;
    String html=f.optString("index.html","");
    if(html.isEmpty())return false;
-   return !java.util.regex.Pattern.compile("(?is)[\"'](?:\\./|/)?src/[^\"']*\\.(?:tsx?|jsx?)['\"]").matcher(html).find();
+   return !java.util.regex.Pattern.compile("(?is)[\"'](?:\\./|/)?src/[^\"']*\\.(?:tsx?|jsx?)(?:[?#][^\"']*)?[\"']").matcher(html).find();
   }catch(Exception e){return false;}
- }
+  }
 
  void start(){
   dialog=new Dialog(a,android.R.style.Theme_Material_Light_NoActionBar);box=new LinearLayout(a);box.setOrientation(1);box.setBackgroundColor(a.BG);
@@ -101,7 +109,22 @@ final class LocalRunner {
       // 静态产物模式下 files 是空的（没过编译器），所有资源都得走这里 ——
       // 包括 88MB 的模型分片，所以必须流式返回，不能整块读进内存。
       WebResourceResponse direct=projectFile(n);if(direct!=null)return direct;
-      return blocked();}catch(Exception e){return blocked();}}return online&&"https".equals(u.getScheme())?null:blocked();}@Override public boolean shouldOverrideUrlLoading(WebView w,WebResourceRequest r){return !host.equals(r.getUrl().getHost());}});
+      return blocked();}catch(Exception e){return blocked();}}return online&&"https".equals(u.getScheme())?null:blocked();}@Override public boolean shouldOverrideUrlLoading(WebView w,WebResourceRequest r){return !host.equals(r.getUrl().getHost());}
+    /*
+     * 页面加载失败必须说出来。
+     *
+     * <p>原来没有任何错误回调：资源路径不对、index.html 不在项目里、
+     * 编译判据判错（把源码工程当成产物直接跑），表现全都是一片白屏。
+     * 用户既不知道是加载失败还是页面本身就是空白，也拿不到任何线索。
+     *
+     * <p>只在主框架失败时报，否则一张图片 404 也会把状态栏刷成「加载失败」。
+     */
+    @Override public void onReceivedError(WebView w,WebResourceRequest r,WebResourceError e){
+     if(r!=null&&r.isForMainFrame())status.setText("加载失败："+e.getDescription()+"（"+r.getUrl().getPath()+"）");
+    }
+    @Override public void onReceivedHttpError(WebView w,WebResourceRequest r,WebResourceResponse resp){
+     if(r!=null&&r.isForMainFrame())status.setText("加载失败：HTTP "+resp.getStatusCode()+"（"+r.getUrl().getPath()+"）");
+    }});
   view.setWebChromeClient(new WebChromeClient(){@Override public boolean onConsoleMessage(ConsoleMessage m){record(m.messageLevel().toString(),m.message()+" ("+m.lineNumber()+")");if(m.messageLevel()==ConsoleMessage.MessageLevel.ERROR)status.setText("运行错误："+m.message()+"（"+m.lineNumber()+"）");return true;}@Override public void onPermissionRequest(PermissionRequest r){
    // 录音类应用要麦克风。只放行音频采集，摄像头、地理等其他能力一律拒绝 ——
    // 预览页跑的是项目代码，不该随便拿到设备能力。
