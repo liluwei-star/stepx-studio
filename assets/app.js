@@ -133,13 +133,49 @@ function currentContent(p,path){
 /*
  * 把项目的所有文本文件内容读出来（只在确实需要全部内容时用）。
  *
- * 比如：全局替换、预览编译。都用这个，避免到处写循环。
+ * 比如：全局替换、预览编译、审查应用时的基线。都用这个，避免到处写循环。
+ *
+ * <p><b>必须走 currentContent，不能用 fileContent。</b>
+ * 输出这份表的两个用途都对「内容」有严格假设：
+ * <ul>
+ *   <li>审查应用时它是传给原生的 {@code base}，原生拿它做
+ *       {@code same(项目当前文件, base)} 的冲突检测 —— 基线不对，检测就是假的；</li>
+ *   <li>审查页左右对比里「当前文件」一侧用的正是 currentContent。</li>
+ * </ul>
+ * 一边含编辑暂存、一边不含，两边看到的内容就不一样：
+ * 用户以为在改 A，原生按 B 做冲突判断，结果要么误报「文件已变化」，
+ * 要么该拦的改动没拦住。口径必须只有一份。
  */
 function allFileContents(p){
   const out={};
   const names=Object.keys((p&&p.files)||{});
-  for(const n of names)out[n]=fileContent(p,n);
+  for(const n of names)out[n]=currentContent(p,n);
   return out;
+}
+/*
+ * 防抖保存。
+ *
+ * <p><b>为什么必须防抖：</b>编辑器原来每敲一个字符就 saveProject() 一次，
+ * 而原生那边保存是把整份 workspace.json 重写一遍（实测 7.5 MB）。
+ * 打字时每秒好几个字符，就是每秒写好几次 7.5 MB ——
+ * 表现是打字卡顿、手机发热、闪存被反复擦写。
+ *
+ * <p>但也不能改成「只在不敲了才保存」：用户敲完立刻切走、或者电脑端
+ * 直接断电，最后那几个字符就丢了。所以做两件事：
+ * <ul>
+ *   <li>敲字时只更新内存里的 editBuffer，400 毫秒没有新输入才落盘；</li>
+ *   <li>任何「可能离开编辑」的动作之前先 flushNow()，把待写的补上。</li>
+ * </ul>
+ */
+let saveTimer=null;
+function saveSoon(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(()=>{saveTimer=null;try{saveProject();}catch(e){}},400);
+}
+function flushNow(){
+  if(saveTimer===null)return;
+  clearTimeout(saveTimer);saveTimer=null;
+  try{saveProject();}catch(e){}
 }
 let pendingImages=[],detectedModels=[],draft=S.draft||'',includeCode=false,undo=[],redo=[],noticeTimer;aiLive=S.activeAi||{};
 const defaults=()=>{for(const k of ['projects','profiles','chats','usage','projectTrash'])if(!Array.isArray(S[k]))S[k]=[]};defaults();
@@ -211,8 +247,67 @@ window.receive=(type,data)=>{
    if(type==='integrationConfig'){try{window.integrationState=JSON.parse(data);}catch(e){window.integrationState={};}if(page==='integrations')render();return;}
    if(type==='memorySkills'){try{window.memoryState=JSON.parse(data);}catch(e){window.memoryState={};}if(page==='memory')render();return;}
   // 原生让前端打开某个文件（文件浏览器的「打开编辑」走这条路）
-  if(type==='assetAudit'){window.auditReport=data;page='audit';render();return;}if(type==='openFile'){file=String(data);undo=[];redo=[];page='editor';render();return;}
-  if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;file='index.html';undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=allFileContents(project());candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId&&page==='editor'){undo=[];redo=[];if(!project()||!(file in project().files))file='index.html';render();notice('AI 已更新当前项目文件');}else renderIfAi();}};
+  if(type==='assetAudit'){window.auditReport=data;page='audit';render();return;}if(type==='openFile'){flushNow();file=String(data);undo=[];redo=[];page='editor';render();return;}
+  if(type==='cloudRelay'){window.cloudRelayState=data;notice(data.message);if(page==='projects')projects();else if(page==='editor')editor();return;}if(type==='aiProjectCreated'){S=JSON.parse(Neo.read());if(chatId===data.chatId){projectId=data.projectId;aiEditMode='auto';renderIfAi();}return;}if(type==='cloudBatch'){S.cloudBatch=data;if(page==='projects')projects();return;}if(type==='connectorStatus'){connectorStatus=data;if($('#connectorStatus'))$('#connectorStatus').textContent=data;return;}if(type==='connectorsChanged'){S.connectors=data;if(page==='connectors')render();return;}if(type==='aiTool'){notice((data.ok?'已完成：':'工具未完成：')+data.name);return;}if(type==='aiLive'){aiLive=data;refreshLiveEdit();return;}if(type==='localModelProgress'){localModelStatus=data;refreshLocalModelProgress();return;}if(type==='localModelCatalog'){localModelCatalog=data;page='localModels';render();return;}if(type==='localModelsChanged'){S.localModels=data;if(page==='localModels')render();return;}if(type==='chatsDeleted'){S=JSON.parse(Neo.read());defaults();if(data.includes(chatId))chatId=null;historySelected.clear();historyEditing=false;if(page==='ai')render();refreshChatHistory();notice('已删除 '+data.length+' 段对话，Token 账本保留');return;}if(type==='cloudError'){notice(data);return;}if(type==='aiSetting'){S=JSON.parse(Neo.read());if(!S.aiAssistantEnabled&&page==='ai')page='projects';render();return;}if(type==='cloudUpdated'){S=JSON.parse(Neo.read());render();return;}if(type==='filesApplied'){
+  /* 待写的内容先落盘，再让 AI 的改动覆盖 —— 否则这一笔会在之后某个时刻把 AI 的改动写回去 */
+  flushNow();
+  S=JSON.parse(Neo.read());projectId=data;candidateFiles=null;candidateBase=null;
+  /*
+   * 别把用户拽回 index.html。
+   *
+   * <p>AI 改完文件，用户往往正盯着刚才讨论的那个文件看改动。
+   * 原来这里无条件 file='index.html' —— 视图直接跳走，
+   * 用户得自己再点回去找到刚才那处改动。
+   *
+   * <p>而且这会让下一轮 AI 拿到的「当前正在看的文件」变成 index.html：
+   * 用户接着说「这里还有问题」，模型却不知道「这里」是哪。
+   *
+   * <p>所以：当前文件还在项目里就留着，被删了才回退到 index.html。
+   */
+  const _ap=project();
+  if(!_ap||!(_ap.files&&Object.prototype.hasOwnProperty.call(_ap.files,file)))file='index.html';
+  /*
+   * 清掉编辑暂存区。
+   *
+   * <p><b>这里不清就是个数据事故：</b>editBuffer 是「编辑器里看到的内容」的
+   * 权威来源，currentContent() 优先读它。文件刚被 AI 改过，原生里已是新内容，
+   * 但 editBuffer 里还留着改之前的旧字符串。
+   *
+   * <p>于是：编辑器继续显示旧代码 → 用户随手敲一个字或点一下保存 →
+   * saveProject() 把 editBuffer 里的旧内容整体发给原生 →
+   * <b>AI 刚写进去的改动被原样覆盖回去</b>，而且没有任何提示。
+   *
+   * <p>清空是安全的：editBuffer 的每次写入都紧跟一次 saveProject()，
+   * 里面的内容早已落盘；清掉之后编辑器会重新从原生读最新内容。
+   */
+  editBuffer={};
+  undo=[];redo=[];render();notice('文件已保存，已保留恢复快照');return;}if(type==='studioUsage'){S=JSON.parse(Neo.read());if(data.status==='runtime')studioReportId=data.report.projectId;if(page==='usage')usage();return;}if(type==='projectOpen'){
+  flushNow();
+  S=JSON.parse(Neo.read());defaults();projectId=data;file='index.html';undo=[];redo=[];
+  /*
+   * 换项目必须清编辑暂存。
+   *
+   * <p>editBuffer 是按「文件路径」存的，不带项目 id。
+   * 而几乎所有项目都有 index.html —— 清空的话，打开 B 项目的 index.html
+   * 会看到 A 项目里编辑过的内容，一敲键盘还会把它存进 B 项目。
+   */
+  editBuffer={};
+  page='editor';render();return;}if(type==='projectChanged'){S=JSON.parse(Neo.read());defaults();if(data.id===projectId&&data.action!=='restore'){projectId=null;includeCode=false;undo=[];redo=[];}page=data.action==='trash'?'projects':page==='trash'?'trash':'projects';render();notice(data.action==='trash'?'已移到最近删除，可恢复':data.action==='restore'?'已恢复到本地项目':'项目已彻底删除');return;}if(type==='autoOpen'){S=JSON.parse(Neo.read());projectId=data;page='collab';render();return;}if(type==='autoUpdate'){S=JSON.parse(Neo.read());if((page==='collab'&&projectId===data)||page==='usage')render();return;}if(type==='buildReady'){S=JSON.parse(Neo.read());projectId=data;page='builds';render();notice('APK 已在 Neo 本机完成签名构建');}else if(type==='building'){buildBusy=data===true||data==='true';if(page==='builds')render();}else if(type==='state'){S=data;defaults();if(!['editor','settings','ai','collab','review','builds'].includes(page))render();}else if(type==='projectRefresh'){S=JSON.parse(Neo.read());if(page==='collab')render();}else if(type==='importCandidate'){S=JSON.parse(Neo.read());projectId=data.id;candidateFiles=data.files;candidateProjectId=data.id;candidateBase=allFileContents(project());candidateSource='Studio / ZIP 导入';page='review';render();}else if(type==='saved'){if($('#saveStatus'))$('#saveStatus').textContent='草稿已保存到本机';}else if(type==='profileSaved'){S=JSON.parse(Neo.read());defaults();editProfile=data.id;profileId=data.id;if(data.next==='local'){page='ai';render();notice('已切换到本地模型');}else if(data.next==='test'){page='ai';newChat();draft='请只回复：连接成功';sendMessage()}else if(page==='settings')settings();}else if(type==='models'){if(editProfile===data.id){detectedModels=data.models;settings();notice('检测到 '+data.models.length+' 个模型；列表可能由服务商分页返回，可继续手动填 ID')}}else if(type==='modelLoading'){if($('#detectButton'))$('#detectButton').textContent=(data===true||data==='true')?'检测中…':'保存并检测模型';}else if(type==='error'){notice(data);if($('#aiToggle'))$('#aiToggle').checked=S.aiAssistantEnabled!==false;busy=false;renderIfAi();}else if(type==='busy'){busy=data===true||data==='true';renderIfAi();refreshChatHistory();}else if(type==='reply'){S=JSON.parse(Neo.read());defaults();if(data.edit?.status==='applied'&&data.edit.projectId===projectId){
+  /*
+   * 自动应用后清掉编辑暂存 —— 不管用户当前在哪个页面。
+   *
+   * <p>原来这段只在 page==='editor' 时执行。可 AI 助手最常用的姿势就是
+   * 待在 AI 页跟它聊、让它改代码，根本没进编辑器。
+   * 这时候暂存区没被清：等用户切回编辑器，看到的是<b>改之前</b>的内容
+   * （currentContent 优先读 editBuffer），一保存就把 AI 的改动覆盖回去。
+   *
+   * <p>「在哪个页面」和「暂存该不该失效」是两件不相干的事。
+   */
+  editBuffer={};undo=[];redo=[];
+  if(!project()||!(file in project().files))file='index.html';
+  if(page==='editor')render();else renderIfAi();
+  notice('AI 已更新当前项目文件');
+}else renderIfAi();}};
 function renderIfAi(){if(page==='ai'||page==='collab'||page==='usage')render()}
 window.backLocal=()=>{if(closeChatHistory())return true;if(page==='collab'||page==='review'||page==='builds'){page='editor';render();return true}if(page==='editor'){page='projects';render();return true}if(page==='trash'){page='projects';render();return true}if(page==='settings'||page==='help'||page==='localModels'||page==='connectors'){page=page==='settings'&&S.aiAssistantEnabled!==false?'ai':'projects';render();return true}return false};
 window.navigate=p=>{closeChatHistory();if(p==='projects'&&page==='editor')return;page=p;render()};
@@ -1070,8 +1165,24 @@ function buildFileMeta(p,q,hits){
     (q?` · 匹配 ${hits.size} 个`:'');
 }
 
-function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor${codeFocus?' code-focus':''}" id="editorRoot"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files"><button class="chosen" data-a="file" data-id="${esc(file)}">${esc(file)}</button><button data-a="filesPage">📁 全部 ${allFiles(p).length} 个</button><button data-a="changesPage">变更</button><button data-a="overviewPage">总览</button><button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="codeFocus">${codeFocus?'⛶ 退出全屏':'⛶ 全屏'}</button><button data-a="fontMinus">A−</button><button data-a="fontPlus">A+</button><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="gotoLine">跳行</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||0)} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});$('#code').value=fileContent(p,file);
-  applyCodeFont();$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(editBuffer[file]!==undefined?editBuffer[file]:fileContent(p,file));if(undo.length>80)undo.shift();redo=[];editBuffer[file]=$('#code').value;saveProject()});$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
+function editor(){const p=project();if(!p){page='projects';render();return}if(!(file in p.files))file=Object.keys(p.files)[0];app.innerHTML=`<div class="editor${codeFocus?' code-focus':''}" id="editorRoot"><div class="row"><button data-a="projectList">‹ 项目</button><h2 class="grow">${esc(p.name)}</h2><button class="primary" data-a="preview">本地运行 ▷</button>${p.cloudSource?'<button data-a="openStudioProject">云端 ↗</button>':''}</div>${cloudControls(p)}<div class="row"><button data-art="open">美术资源</button></div>${liveEditCard()}<div class="files"><button class="chosen" data-a="file" data-id="${esc(file)}">${esc(file)}</button><button data-a="filesPage">📁 全部 ${allFiles(p).length} 个</button><button data-a="changesPage">变更</button><button data-a="overviewPage">总览</button><button data-a="addFile">＋ 文件</button></div><textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="代码编辑器" wrap="off"></textarea><div class="tools"><button data-a="codeFocus">${codeFocus?'⛶ 退出全屏':'⛶ 全屏'}</button><button data-a="fontMinus">A−</button><button data-a="fontPlus">A+</button><button data-a="indent">Tab</button><button data-a="undo">撤销</button><button data-a="redo">重做</button><button data-a="findCode">查找</button><button data-a="gotoLine">跳行</button><button data-a="copyCode">复制</button><button data-a="collab">项目协作</button><button data-a="builds">构建 APK</button><button data-a="aiCode">问 AI</button><button data-a="exportProject">导出 ZIP</button><button data-a="renameProject">重命名</button><button class="danger" data-a="deleteFile">删文件</button><button class="danger" data-a="deleteProject">删项目</button></div><div class="status" id="saveStatus">本机自动保存 · ${(p.files[file]||0)} 字符</div></div>`;document.querySelector('.files .chosen')?.scrollIntoView({block:'nearest',inline:'center'});
+  /*
+   * 渲染编辑器一律用 currentContent，不能用 fileContent。
+   *
+   * <p>fileContent 只读<b>已存盘</b>的内容；用户正在敲的东西在 editBuffer 里。
+   * 保存是异步发出去的，所以两者之间永远有一段窗口不一致。
+   *
+   * <p>只要这期间发生一次重新渲染（state 事件回来、切页面再切回来、
+   * 改个字体、AI 那边推了条状态），输入框就会被塞回磁盘上的旧内容 ——
+   * 用户看着自己刚敲的几行字凭空消失，然后再敲一遍。
+   *
+   * <p>currentContent 的定义就是「编辑器里应该显示什么」：暂存优先、落盘兜底。
+   * 渲染走它，这条路径才是自洽的。
+   */
+  $('#code').value=currentContent(p,file);
+  applyCodeFont();$('#code').disabled=!file;$('#code').addEventListener('input',()=>{undo.push(editBuffer[file]!==undefined?editBuffer[file]:fileContent(p,file));if(undo.length>80)undo.shift();redo=[];editBuffer[file]=$('#code').value;saveSoon()});
+  /* 离开输入框（切走、点了别处）立刻落盘，不留未保存的内容 */
+  $('#code').addEventListener('blur',()=>flushNow());$('#code').addEventListener('keydown',e=>{if(e.key==='Tab'){e.preventDefault();insert('  ')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveProject()}})}
 /**
  * 跳到代码的第 n 行。
  *
@@ -1237,7 +1348,17 @@ function ai(){if(!chatId&&S.chats.length)chatId=S.chats.filter(x=>(x.projectId||
   const setup=document.querySelector('.ai-setup');
   if(setup)setup.addEventListener('toggle',()=>{aiSetupOpen=setup.open;});}
 function newChat(){if(busy){notice('请等待当前请求结束');return}const c={id:uuid(),name:'新对话',projectId:projectId||'',messages:[],created:Date.now()};S.chats.push(c);chatId=c.id;saveChat();render()}
-function sendMessage(){if(busy)return;const p=selectedProfile();if(!p||(!p.hasKey&&p.protocol!=='local')){notice('请先保存模型配置和 API Key');return}/*
+function sendMessage(){
+  if(busy)return;
+  /*
+   * 先把待写的编辑落盘。
+   *
+   * <p>保存现在是防抖的（见 saveSoon）：用户敲完最后一句、立刻点发送，
+   * 那一刻磁盘上可能还是几秒前的内容。不 flush 的话模型读到的是旧代码，
+   * 用户却以为它看的是屏幕上这一版 —— 改出来的东西自然对不上。
+   */
+  flushNow();
+  const p=selectedProfile();if(!p||(!p.hasKey&&p.protocol!=='local')){notice('请先保存模型配置和 API Key');return}/*
  * 只发一张图、不打字，是合理用法 —— 用户就是想问「这截图里的报错怎么回事」。
  * 所以「没有文字」不能直接拦掉，得看有没有待发的图片。
  */
@@ -1251,7 +1372,44 @@ const text=draft.trim();
  */
 /* 不再按字符数拦：真正的限制是模型上下文窗口，由服务端判断。
    在本地猜一个数，只会让用户莫名其妙被拦。 */
-const createProject=Neo.wantsNewProject(text);if(createProject){projectId=null;chatId=null;newChat();}else if(!chat()||(chat().projectId||null)!==projectId)newChat();const c=chat(),target=project();if(!c.messages.length)c.name=(text||'图片对话').slice(0,24);c.messages.push(pendingImages.length?{role:'user',content:text,images:pendingImages.slice()}:{role:'user',content:text});pendingImages=[];saveChat(c);draft='';send('draft',{text:''});busy=true;send('send',{createProject,profileId:p.id,chatId:c.id,projectId:target?.id||'',projectContext:!!target,githubResearch,editMode:target&&aiEditMode!=='discuss'?aiEditMode:'',messages:c.messages.map(m=>{
+/*
+ * 用户当前正在看的文件和光标位置。
+ *
+ * <p>为什么必须带上：用户会说「这个按钮怎么改」「这里为什么报错」，
+ * 但「这个」「这里」指的是屏幕上的哪一个文件，光看对话历史是猜不出来的。
+ * 少了这条，模型只能反问「你说的是哪个文件」，来回两轮才问得清。
+ *
+ * <p>AI 页面和编辑器页面是同一个页面里的两个视图，用户随时能切。
+ * 所以发消息的那一刻现场取一次：编辑器的 textarea 还在 DOM 里就取光标，
+ * 取不到就只报文件名、不报行号 —— 半个信息也比没有强。
+ */
+let activeFile='',activeLine=0;
+try{
+  /*
+   * 「当前文件」和「光标行」要分开判断。
+   *
+   * <p><b>原来的写法把两件事绑在一起：</b>只在 page==='editor' 时
+   * 才把 file 报上去。可 AI 助手的主战场恰恰是<b>AI 页面</b> ——
+   * 用户从编辑器点进 AI 页问「这个按钮怎么改」，page 已经是 'ai'，
+   * 文件名当场就丢了，模型又只能反问「你说的是哪个文件」。
+   *
+   * <p>所以：文件跟着 file 走（它记住的是用户最后打开的那个文件，
+   * 切页面不影响），只有光标行要求编辑器真在屏幕上 ——
+   * textarea 不在 DOM 里的时候，光标位置没有意义。
+   */
+  const p0=project();
+  if(typeof file==='string'&&file&&p0&&p0.files&&Object.prototype.hasOwnProperty.call(p0.files,file)){
+    activeFile=file;
+    if(page==='editor'){
+      const ta=document.getElementById('code');
+      if(ta&&typeof ta.selectionStart==='number'){
+        /* selectionStart 是字符偏移，换成行号：从开头数到光标位置有几个换行 +1 */
+        activeLine=ta.value.slice(0,ta.selectionStart).split('\n').length;
+      }
+    }
+  }
+}catch(e){}
+const createProject=Neo.wantsNewProject(text);if(createProject){projectId=null;chatId=null;newChat();}else if(!chat()||(chat().projectId||null)!==projectId)newChat();const c=chat(),target=project();if(!c.messages.length)c.name=(text||'图片对话').slice(0,24);c.messages.push(pendingImages.length?{role:'user',content:text,images:pendingImages.slice()}:{role:'user',content:text});pendingImages=[];saveChat(c);draft='';send('draft',{text:''});busy=true;send('send',{createProject,profileId:p.id,chatId:c.id,projectId:target?.id||'',projectContext:!!target,githubResearch,editMode:target&&aiEditMode!=='discuss'?aiEditMode:'',activeFile,activeLine,messages:c.messages.map(m=>{
   if(!m.images||!m.images.length)return {role:m.role,content:m.content};
   const parts=[];
   if(m.content)parts.push({type:'text',text:m.content});
@@ -1914,7 +2072,7 @@ case 'fontMinus':codeFont=Math.max(9,codeFont-1);localStorage.setItem('codeFont'
 case 'gotoLine':send('askLine');break;
 case 'doGotoLine':gotoLine(data&&data.line||1);break;
 case 'fmToggle':fileCollapsed[id]=!fileCollapsed[id];filesPage();break;
-case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',{id:p.id});break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]=0;editBuffer[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];delete editBuffer[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(currentContent(p,file));editBuffer[file]=undo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'redo':if(redo.length){undo.push(currentContent(p,file));editBuffer[file]=redo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'findCode':{
+case 'fileMenu':fileMenu(id);break;case 'projectList':page='projects';render();break;case 'file':flushNow();file=id;undo=[];redo=[];page='editor';render();break;case 'preview':saveProject();send('localRun',{id:p.id});break;case 'exportProject':saveProject();send('exportProject',{id:p.id});break;case 'renameProject':{let n=prompt('项目名称',p.name);if(n){p.name=n.slice(0,60);saveProject();render()}break}case 'projectMenu':send('projectMenu',{id});break;case 'deleteProject':send('projectTrash',{id:id||p?.id});break;case 'restoreProject':send('projectRestore',{id});break;case 'purgeProject':send('projectPurge',{id});break;case 'addFile':{let n=prompt('根目录文本文件名，例如 utils.js');if(!n)return;if(!(p.cloudSource?validSourcePath(n):/^[\p{L}\p{N}_-][\p{L}\p{N} ._-]{0,99}$/u.test(n)&&!n.includes('..'))||p.files[n]!=null||p.binaryFiles?.[n]!=null){notice('文件名无效或已存在');return}p.files[n]=0;editBuffer[n]='';file=n;saveProject();render();break}case 'deleteFile':if(file==='index.html'&&!p.cloudSource){notice('请保留项目入口 index.html');break}if(confirm('删除 '+file+'？')){delete p.files[file];delete editBuffer[file];file='index.html';saveProject();render()}break;case 'indent':insert('  ');break;case 'undo':if(undo.length){redo.push(currentContent(p,file));editBuffer[file]=undo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'redo':if(redo.length){undo.push(currentContent(p,file));editBuffer[file]=redo.pop();saveProject();$('#code').value=editBuffer[file]}break;case 'findCode':{
   let q=prompt('查找文字');if(!q)break;
   const t=$('#code'),src=t.value;
   /*

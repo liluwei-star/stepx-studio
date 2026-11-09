@@ -140,6 +140,15 @@ final class SelfTest {
   check(!rep4.optBoolean("unchanged",false)&&rep4.optString("content","").contains("改过了"),
    "reading again after the file changed returns the new content");
   /*
+   * 识别重复的那张表不能存结果全文。
+   *
+   * <p>之前存的是完整 JSON：read_file 一个结果几百 KB，
+   * 200 条上限就是几十 MB —— 正是当初 OOM 的病根。
+   * 现在只存指纹，这张表占的字符数应该小到不成样子。
+   */
+  check(repDev.repeatCacheChars()<4096,
+   "the repeat-detection cache stores fingerprints, not whole tool results [chars="+repDev.repeatCacheChars()+"]");
+  /*
    * 空回复兜底 —— 模型不写字时用户也得看到发生了什么。
    */
   JSONObject sumRes=new JSONObject().put("stagedFiles",new JSONObject().put("src/a.ts","x").put("src/b.ts","y"));
@@ -400,6 +409,7 @@ final class SelfTest {
   check(autoAfter>=1,
    "the automatic snapshots are still kept");
   a.remove("projects","qa-snapkeep");
+  newChecks();
   check(a.memory.usageFor(muScope).indexOf("记忆用量")<0
     ||!a.memory.usageFor(muScope).contains("本项目"),
    "clearing the test scope removes it from the usage line");
@@ -2094,4 +2104,81 @@ final class SelfTest {
 
   check(!a.safeFile("../secret")&&!a.safeFile("x/y.html")&&a.safeFile("index.html"),"import traversal blocked");out.put("result","PASS");
  }catch(Exception e){try{out.put("result","FAIL").put("error",e.toString());}catch(Exception ignored){}}try{out.put("passed",passed).put("checks",details);try(FileOutputStream f=new FileOutputStream(new File(a.getFilesDir(),"selftest.json"))){f.write(out.toString(2).getBytes("UTF-8"));}}catch(Exception ignored){}}
+ /**
+  * 本轮新增的检查：行号剥离、路径校验范围、基线漂移抢救。
+  *
+  * <p>单独放一个方法，是为了不必在巨大的 run() 里找插入点 ——
+  * 那里面字符串和注释里的花括号让括号配平没法用来定位结尾。
+  */
+ static void newChecks()throws Exception{
+  /*
+   * read_file 返回的内容每行带「12: 」这样的行号前缀。
+   *
+   * 那是给人看的定位信息，不是文件内容。模型最常见的动作是
+   * 「读出来 → 改两行 → 整份写回」，它通常不会自己删掉那些前缀。
+   * 行号一旦写进项目，往往还能编译通过（在 JS 里就是一句标签 + 表达式），
+   * 用户只看到页面多出一堆数字，查不出原因。
+   *
+   * 判据必须严：所有非空行都是「数字: 」，而且这些数字从 1 连续递增。
+   */
+  String numberedContent="1: <div>\n2: </div>\n3: <p>x</p>";
+  check(LocalDevTools.stripLineNumbers(numberedContent).equals("<div>\n</div>\n<p>x</p>"),
+   "line numbers copied out of read_file are stripped before writing");
+  String normalCode="const a=1;\nconsole.log(a);";
+  check(LocalDevTools.stripLineNumbers(normalCode).equals(normalCode),
+   "ordinary code is never touched by the line-number stripper");
+  check(LocalDevTools.stripLineNumbers("2: a\n3: b").equals("2: a\n3: b"),
+   "numbering that does not start at 1 is left alone");
+  /*
+   * patch_file 改的是文件中间几行，它拿到的片段行号不从 1 开始。
+   * 用整份的判据去判，这批行号一个都剥不掉。
+   */
+  check(LocalDevTools.stripSnippetLineNumbers("12: a\n13: b").equals("a\nb"),
+   "a snippet numbered from 12 is stripped too (patch_file path)");
+  check(LocalDevTools.stripSnippetLineNumbers("7: hello",7).equals("hello"),
+   "a single numbered line is stripped when its number matches the patch start");
+  check(LocalDevTools.stripSnippetLineNumbers("7: hello",12).equals("7: hello"),
+   "a single line is left alone when the number does not match");
+  /*
+   * 项目里本来就有的非白名单文件（导入的 csv/xml，早期版本的怪路径）
+   * 不能把 AI 锁死：校验只该管「这次改了什么」。
+   */
+  boolean untouchedOk=true;
+  try{
+   ProjectEdits.validate(new JSONObject().put("index.html","NEW").put("data.csv","a,b"),
+    new JSONObject().put("index.html","OLD").put("data.csv","a,b"));
+  }catch(Exception e){untouchedOk=false;}
+  check(untouchedOk,"an untouched csv in the project does not block later AI edits");
+  boolean newFileBlocked=false;
+  try{
+   ProjectEdits.validate(new JSONObject().put("index.html","N").put("out.csv","x"),
+    new JSONObject().put("index.html","O"));
+  }catch(Exception e){newFileBlocked=true;}
+  check(newFileBlocked,"a csv the AI tries to add is still rejected");
+  /*
+   * 基线漂移时的抢救。
+   *
+   * AI 跑了几分钟，用户在中间保存过一次 index.html。
+   * 整轮丢掉太亏（那十几个文件都白改），覆盖用户更不行。
+   * 正确做法：没冲突的文件照常写回，冲突的那个跳过并点名。
+   */
+  JSONObject salvageBase=new JSONObject().put("index.html","OLD").put("app.js","OLD-B");
+  JSONObject salvageLive=new JSONObject().put("files",
+   new JSONObject().put("index.html","USER").put("app.js","OLD-B"));
+  JSONObject salvageEdit=new JSONObject();
+  try{
+   JSONObject salvaged=MainActivity.applyAiChanges(salvageLive,salvageBase,
+    new JSONObject().put("index.html","AI").put("app.js","AI-B"),salvageEdit);
+   JSONObject kept=salvaged.getJSONObject("files");
+   check("USER".equals(kept.getString("index.html"))&&"AI-B".equals(kept.getString("app.js")),
+    "a file the user edited meanwhile is never overwritten, the rest still lands");
+   check(salvageEdit.optJSONArray("heldBack")!=null
+     &&salvageEdit.getJSONArray("heldBack").length()==1
+     &&"index.html".equals(salvageEdit.getJSONArray("heldBack").getString(0)),
+    "the held-back file is named so the user knows what was skipped");
+  }catch(Exception e){
+   check(false,"salvage path failed: "+e.getMessage());
+  }
+ }
+
 }

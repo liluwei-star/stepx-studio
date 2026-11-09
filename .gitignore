@@ -18,6 +18,9 @@ vendor/tools/
 __pycache__/
 *.pyc
 
+# 单元测试在 tests/ 下生成的临时编译目录（每次跑测试自动重建）
+tests/.tmp-*/
+
 # 提交信息临时文件，不要提交
 *.tmp
 .cm.tmp

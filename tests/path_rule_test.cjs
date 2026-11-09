@@ -50,25 +50,36 @@ check(/路径不合法（不能以 \/ 开头[^"]*："\+cn/.test(edits),
  'the error names the offending file');
 
 console.log('\n── 只查本轮改动，不查项目原有的 ─────────────────');
-/* 严格检查必须出现在 apply 里、遍历 changes，而不是遍历 next */
+/*
+ * 校验现在住在 mergeChecked 里：apply（提交）和 stage（暂存）都调它。
+ * 这样提交和暂存走的是同一套规则，不会各写一份又慢慢跑偏。
+ */
 const applyIdx=edits.indexOf('static JSONObject apply(');
 check(applyIdx>0,'apply exists');
-const applyBody=edits.slice(applyIdx);
-check(/for\(Iterator<String> ci=changes\.keys\(\);ci\.hasNext\(\);\)/.test(applyBody),
+check(/static JSONObject mergeChecked\(/.test(edits),'mergeChecked exists');
+const checkIdx=edits.indexOf('static JSONObject mergeChecked(');
+check(checkIdx>0,'the shared validation path exists');
+check(/apply\([^)]*\)[^{]*\{[\s\S]{0,400}?mergeChecked\(/.test(edits),
+ 'apply goes through mergeChecked');
+check(/static void stage\(JSONObject project,JSONObject changes\)[\s\S]{0,400}?mergeChecked\(/.test(edits),
+ 'stage goes through mergeChecked too');
+
+const mergeBody=edits.slice(checkIdx, edits.indexOf('static JSONObject apply('));
+check(/for\(Iterator<String> ci=changes\.keys\(\);ci\.hasNext\(\);\)/.test(mergeBody),
  'the strict check iterates over the changes');
-check(!/for\(Iterator<String> ci=next\.keys\(\)/.test(applyBody),
+check(!/for\(Iterator<String> ci=next\.keys\(\)/.test(mergeBody),
  'the strict check does not iterate over the whole project');
 
 console.log('\n── 校验发生在落盘之前 ───────────────────────────');
-const checkIdx=applyBody.indexOf('CloudFiles.path(cn)');
-const commitIdx=applyBody.search(/put\("files",next\)/);
-check(checkIdx>0,'the path check exists');
-check(commitIdx>0,'the commit exists');
-check(checkIdx<commitIdx,'the path check runs BEFORE the files are committed');
+const pathIdxInMerge=mergeBody.indexOf('CloudFiles.path(cn)');
+check(pathIdxInMerge>0,'the path check exists');
+check(/return next;/.test(mergeBody),'the merge returns the checked file table');
+check(pathIdxInMerge < mergeBody.indexOf('return next;'),
+ 'the path check runs BEFORE the file table is handed back');
 
 console.log('\n── 删除操作也要过路径校验 ───────────────────────');
 /* changes 里的 NULL 表示删除，仍在 changes 里，会被查到 */
-check(/for\(Iterator<String> ci=changes\.keys\(\)/.test(applyBody),
+check(/for\(Iterator<String> ci=changes\.keys\(\)/.test(mergeBody),
  'deletions travel in the same changes object, so they are checked too');
 
 console.log('\n'+'-'.repeat(52));

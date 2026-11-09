@@ -50,7 +50,8 @@ final class ArtManager {
   String file=q.optString("referenceFile"),token=q.optString("placeholder");if(file.isEmpty())return;JSONObject files=staged.getJSONObject("files");if(!files.has(file))throw new Exception("引用文件不存在，请先创建该文件");String content=files.getString(file),url=reference(path);
   if(!token.isEmpty()){int at=content.indexOf(token);if(at<0||content.indexOf(token,at+token.length())>=0)throw new Exception("占位符必须在引用文件中精确出现一次");content=content.substring(0,at)+url+content.substring(at+token.length());}
   else{if(!file.endsWith(".html")||!content.contains("</body>"))throw new Exception("自动插入仅支持含 </body> 的 HTML；其他代码请填写唯一占位符");content=content.replace("</body>","<figure><img src=\""+url+"\" alt=\"生成的美术资源\" style=\"max-width:100%;height:auto\"></figure>\n</body>");}
-  JSONObject next=ProjectEdits.apply(staged,files,new JSONObject().put(file,content),"美术引用暂存");staged.put("files",next.getJSONObject("files"));
+  /* 暂存副本只需要合并，不需要提交副作用（快照 / 历史 / 时间戳） —— 见 ProjectEdits.stage 的说明 */
+  ProjectEdits.stage(staged,new JSONObject().put(file,content));
  }
  JSONObject tool(JSONObject staged,JSONObject q)throws Exception{
   synchronized(a){if(!a.state.optBoolean("artAllowAI"))throw new Exception("绘图 API 尚未允许 AI 调用，请在美术资源中开启");}if(busy)throw new Exception("已有绘图任务正在进行");busy=true;a.event("artBusy",true);try{return generate(staged,q,true,"").getJSONObject("asset");}finally{busy=false;current=null;a.event("artBusy",false);a.sendState();}

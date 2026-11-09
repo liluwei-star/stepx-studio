@@ -20,6 +20,20 @@ import java.nio.charset.StandardCharsets;
 class ApiClient {
  interface Progress {void update(String text,String reasoning);}
  Progress progress;final JSONArray usageSegments=new JSONArray();
+ /**
+  * 本次请求是否已经把内容交给过前端。
+  *
+  * <p>重试的唯一安全前提是「用户什么都没看见」：请求根本没生效、
+  * 或者刚开始就断了。一旦正文已经吐到屏幕上，再重发就是
+  * 把同一段话再说一遍 —— 用户看到的不是恢复，是重影。
+  *
+  * <p>更糟的是它掩盖了真实原因：用户以为「网络重试了一下」，
+  * 实际上模型已经生成了一半、服务端也计了费，
+  * 而这一轮最后还可能因为重试次数用尽而报错，让人完全对不上。
+  *
+  * <p>所以只要 {@code delivered} 为真，任何 IOException 都直接抛出。
+  */
+ volatile boolean delivered;
  volatile HttpURLConnection connection;volatile boolean cancelled;
  static String endpoint(String raw,String protocol,boolean debug)throws Exception{
   URI u=new URI(raw.trim());boolean local=debug&&"http".equals(u.getScheme())&&"127.0.0.1".equals(u.getHost());
@@ -122,6 +136,64 @@ static JSONObject requestBody(JSONObject p,JSONArray messages,String system,JSON
 
  /** 带工具的请求。 */
  JSONObject request(JSONObject p,String secret,JSONArray messages,String system,boolean debug,JSONArray tools)throws Exception{
+  /*
+   * 网络抖动重试。
+   *
+   * <p>为什么必须有：一次工具循环要连着发几十次请求，
+   * 每次都重新建 TCP 连接、重新握手。中途任何一次连接被服务商回收、
+   * 或者手机网络切了一下，整轮几十次工具调用全部作废 ——
+   * 模型已经改好的文件、已经读到的内容，全都白费。
+   *
+   * <p>用户看到的现象是「AI 干了一半突然报网络错误」，
+   * 而已改的文件因为暂存区没提交，全丢了。
+   *
+   * <p><b>只重试「还没吐出内容」的失败：</b>连接超时、连接被重置、
+   * 首字节读超时。这类失败说明请求根本没开始生效，重发是安全的。
+   * 一旦已经开始往回吐字就不重试 —— 重发会把同样的内容再吐一遍，
+   * 用户看到的是重复文本，比直接报错更糟。
+   */
+  IOException last=null;
+  for(int attempt=1;attempt<=NET_RETRY_ATTEMPTS+1;attempt++){
+   if(cancelled)throw new InterruptedIOException("已取消");
+   try{
+    return requestOnce(p,secret,messages,system,debug,tools,attempt>1);
+   }catch(IOException e){
+    /* 用户主动取消不算失败，也不重试 */
+    if(cancelled||e instanceof InterruptedIOException)throw e;
+    /*
+     * 已经往界面吐过内容了，不许重放。
+     *
+     * <p>见字段 delivered 的说明：重发会把同样的正文再说一遍，
+     * 用户看到的是重复文本，而不是「恢复正常了」。
+     * 这种时候正确的做法是如实报告中断，让用户自己决定是否继续。
+     */
+    if(delivered)throw e;
+    /* 服务端明确拒绝的，重试没有意义 */
+    String m=e.getMessage()==null?"":e.getMessage();
+    if(m.startsWith("HTTP "))throw e;
+    last=e;
+    if(attempt>NET_RETRY_ATTEMPTS)break;
+    /* 退避一下再试，别在网络不通的时候连着撞墙 */
+    try{Thread.sleep(800L*attempt);}catch(InterruptedException ie){throw new InterruptedIOException("已取消");}
+    if(cancelled)throw new InterruptedIOException("已取消");
+   }
+  }
+  throw last==null?new IOException("请求失败"):last;
+ }
+
+ /** 网络失败最多重试几次（不含第一次）。 */
+ static final int NET_RETRY_ATTEMPTS=2;
+
+ JSONObject requestOnce(JSONObject p,String secret,JSONArray messages,String system,boolean debug,JSONArray tools,boolean retrying)throws Exception{
+  /*
+   * 每次真正发一次 HTTP 请求前复位。
+   *
+   * <p>delivered 判的是「这一次请求有没有把内容交给用户」，
+   * 不是「这个客户端有没有交过」。同一个 ApiClient 会在一次工具循环里
+   * 连发几十次请求：上一轮早就把正文吐完了，如果不清零，
+   * 这一轮连接刚建好就断也会被判定成「已经输出过」而不重试。
+   */
+  delivered=false;
   String protocol=p.optString("protocol","compatible");String url=endpoint(p.getString("endpoint"),protocol,debug);
   if(secret.isEmpty())throw new Exception("请先在模型设置中保存 API Key");
   JSONObject body=requestBody(p,messages,system,tools);
@@ -129,13 +201,50 @@ static JSONObject requestBody(JSONObject p,JSONArray messages,String system,JSON
   if(cancelled)throw new InterruptedIOException("已取消");
   HttpURLConnection c=(HttpURLConnection)new URL(url).openConnection();connection=c;
   try{
-   c.setInstanceFollowRedirects(false);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(ModelLimits.deepSeek(p.optString("endpoint"),p.optString("model"))?0:120000);c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");
+   c.setInstanceFollowRedirects(false);c.setRequestMethod("POST");c.setConnectTimeout(20000);
+   /*
+    * 读超时。
+    *
+    * <p>原来非 DeepSeek 一律 120 秒。问题是：模型「思考」期间服务端可能
+    * 十几秒不吐任何字节，一个复杂问题想两分钟很常见 —— 一超就
+    * SocketTimeoutException，而这一轮几十次工具调用全部作废。
+    *
+    * <p>放宽到 300 秒。DeepSeek 保持 0（不限），它本来就慢。
+    *
+    * <p>流式下这个超时是「两个数据块之间的间隔」，不是总时长，
+    * 所以放宽不会让正常请求变慢，只是不再误杀慢思考。
+    */
+   c.setReadTimeout(ModelLimits.deepSeek(p.optString("endpoint"),p.optString("model"))?0:300000);
+   c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");
    if(protocol.equals("anthropic")){c.setRequestProperty("x-api-key",secret);c.setRequestProperty("anthropic-version","2023-06-01");}else c.setRequestProperty("Authorization","Bearer "+secret);
    byte[]data=body.toString().getBytes(StandardCharsets.UTF_8);if(data.length>32*1024*1024)throw new IOException("请求超过32 MB传输限制；请分批处理");c.setFixedLengthStreamingMode(data.length);
    try(OutputStream o=c.getOutputStream()){o.write(data);}
    int code=c.getResponseCode();if(code!=200)throw new IOException("HTTP "+code+(code==400?"：模型参数或上下文超限；上下文总量包含输入和输出预留，请减少输入或输出上限":code==401?"：密钥或权限错误":code==429?"：额度或速率限制":code>=300&&code<400?"：已阻止重定向，请核对接口地址":"：请求失败，请检查模型、参数和服务状态"));
    JSONObject raw;
-   if(c.getContentType()!=null&&c.getContentType().toLowerCase().contains("text/event-stream")){try(InputStream in=c.getInputStream()){raw=StreamResponse.read(in,protocol.equals("anthropic"),this);}}
+   if(c.getContentType()!=null&&c.getContentType().toLowerCase().contains("text/event-stream")){
+    /*
+     * 重试时把上一轮吐到前端的字清掉。
+     *
+     * <p>有了 delivered 门槛，走到这里时一定是「一个字节都没吐过」，
+     * 所以这条清理其实已经不会触发内容差异；保留它是为了防御
+     * 未来某条路径在吐完之后仍然回到重试分支。
+     */
+    if(retrying&&progress!=null)progress.update("","");
+    /*
+     * 包一层进度回调，用来记录「这次到底有没有把内容交给用户」。
+     *
+     * <p>必须包在 progress 上而不是自己另记一份：正文和思维链
+     * 都是通过这个回调流到界面的，只有在这里才能准确知道
+     * 用户已经看见了什么。读完恢复原来的回调，不影响调用方。
+     */
+    Progress realProgress=progress;
+    if(realProgress!=null)progress=new Progress(){
+     public void update(String text,String reasoning){
+      if((text!=null&&!text.isEmpty())||(reasoning!=null&&!reasoning.isEmpty()))delivered=true;
+      realProgress.update(text,reasoning);
+     }};
+    try(InputStream in=c.getInputStream()){raw=StreamResponse.read(in,protocol.equals("anthropic"),this);}
+    finally{progress=realProgress;}}
    else{byte[] bytes;try(InputStream in=c.getInputStream()){bytes=MainActivity.readLimited(in,16*1024*1024);}raw=new JSONObject(new String(bytes,StandardCharsets.UTF_8));}
    String content="",reason="",finish="";
    if(protocol.equals("anthropic")){finish=raw.optString("stop_reason");JSONArray a=raw.optJSONArray("content");if(a!=null)for(int i=0;i<a.length();i++){JSONObject x=a.getJSONObject(i);if(x.optString("type").equals("text"))content+=x.optString("text");}}

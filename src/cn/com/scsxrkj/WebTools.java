@@ -78,7 +78,39 @@ final class WebTools {
    * 正常主机名不会以 0x 开头，也不会出现 .0x 这样的一段。
    */
   if(h.startsWith("0x")||h.contains(".0x"))return true;
-  // IPv4 字面量判断
+  /*
+   * IPv4 字面量判断。
+   *
+   * <p>不能只按「四个点分十进制」这一种写法来判 —— Java 的 DNS 解析
+   * 接受的写法比那多得多。实测：
+   *
+   * <pre>
+   * InetAddress.getByName("2130706433")  -> 127.0.0.1   // 十进制整数
+   * InetAddress.getByName("127.1")       -> 127.0.0.1   // 短形式
+   * InetAddress.getByName("127.0.1")     -> 127.0.0.1   // 短形式
+   * </pre>
+   *
+   * <p>前两种原样都躲过了上面的字符兜底（全是数字和点），
+   * 于是「不能访问本机和内网地址」这条防线被绕过：
+   * 模型只要写 fetch("http://2130706433/") 就能读到内网服务，
+   * 写 fetch("http://169.254.169.254/latest/meta-data/") 就能碰到云厂商的
+   * 实例元数据接口 —— 那里通常挂着临时凭据。
+   *
+   * <p>所以这里不靠正则猜，而是<b>用解析器自己解析一遍</b>：
+   * 凡是能被解析成 IP 字面量的，都按解析结果判内外网。
+   * 解析不出来（真的是域名）才走原有逻辑。
+   */
+  try{
+   /* 只有全数字、或短形式，才可能被解析器当成 IP 字面量 */
+   boolean maybeIp=h.matches("\\d+")||h.matches("\\d{1,3}(\\.\\d{1,3}){1,3}");
+   if(maybeIp){
+    java.net.InetAddress addr=java.net.InetAddress.getByName(h);
+    if(isPrivateAddress(addr))return true;
+   }
+  }catch(Exception ignored){
+   /* 解析不了就当它是普通域名，走下面的兜底 */
+  }
+  // IPv4 四段写法（正常形态）
   if(h.matches("\\d{1,3}(\\.\\d{1,3}){3}")){
    String[] p=h.split("\\.");
    try{
@@ -89,6 +121,65 @@ final class WebTools {
     if(a0==169&&a1==254)return true;
     if(a0==100&&a1>=64&&a1<=127)return true;
    }catch(NumberFormatException ignored){return true;}
+  }
+  return false;
+ }
+
+ /**
+  * 解析域名并检查它现在指向的 IP 是不是内网。
+  *
+  * <p>只拦明确解析到内网的。解析失败（断网、DNS 抽风）时放行 ——
+  * 因为这时候根本连不上，让请求自己去报错，比在这里误杀要好。
+  */
+ static void checkResolved(URL url)throws Exception{
+  String host=url.getHost();
+  if(host==null||host.isEmpty())return;
+  try{
+   java.net.InetAddress[] all=java.net.InetAddress.getAllByName(host);
+   for(java.net.InetAddress addr:all){
+    if(isPrivateAddress(addr))throw new Exception("出于安全考虑，不能访问本机和内网地址（"+host+"）");
+   }
+  }catch(java.net.UnknownHostException ignored){
+   /* 解析不了就交给真正的连接去报错 */
+  }
+ }
+
+ /**
+  * 判一个已解析出来的 IP 是不是内网/回环/链路本地。
+  *
+  * <p>169.254.0.0/16 是链路本地段，云厂商的实例元数据接口就挂在
+  * 169.254.169.254 上 —— 这是 SSRF 里最值钱的一个目标，必须挡住。
+  */
+ static boolean isPrivateAddress(java.net.InetAddress addr){
+  byte[] b=addr.getAddress();
+  if(b==null)return true;
+  if(b.length==4){
+   int a0=b[0]&0xff,a1=b[1]&0xff;
+   if(a0==127||a0==10||a0==0)return true;
+   if(a0==192&&a1==168)return true;
+   if(a0==172&&a1>=16&&a1<=31)return true;
+   if(a0==169&&a1==254)return true;              // 链路本地：元数据接口在这
+   if(a0==100&&a1>=64&&a1<=127)return true;    // CGNAT
+   if(a0>=224)return true;                      // 组播和保留段
+   return false;
+  }
+  if(b.length==16){
+   if(java.util.Arrays.equals(b,new byte[16]))return true;               // ::
+   boolean allZero=true;
+   for(int i=0;i<15;i++)if(b[i]!=0){allZero=false;break;}
+   if(allZero&&b[15]==1)return true;                                       // ::1
+   int f=b[0]&0xff;
+   if((f&0xfe)==0xfc)return true;                                         // fc00::/7
+   if((f&0xc0)==0x80)return true;                                         // fe80::/10
+   if(f==0xff)return true;                                                // ff00::/8
+   /* IPv4 映射地址（::ffff:127.0.0.1）—— 里面套的就是 IPv4，一起判 */
+   if(f==0&&(b[10]&0xff)==0xff&&(b[11]&0xff)==0xff){
+    int a0=b[12]&0xff,a1=b[13]&0xff;
+    if(a0==127||a0==10||a0==0)return true;
+    if(a0==192&&a1==168)return true;
+    if(a0==172&&a1>=16&&a1<=31)return true;
+    if(a0==169&&a1==254)return true;
+   }
   }
   return false;
  }
@@ -190,6 +281,18 @@ final class WebTools {
  JSONObject fetch(String rawUrl)throws Exception{
   URL url=checkUrl(rawUrl);
   for(int hop=0;hop<MAX_REDIRECTS;hop++){
+   /*
+    * 连之前再查一次「这个域名现在解析到哪个 IP」。
+    *
+    * <p>只看主机名是不够的：checkUrl 拦的是「主机名本身像内网」，
+    * 但一个正常的公网域名完全可以解析到 127.0.0.1 ——
+    * 这就是 DNS rebinding。攻击者让域名的 DNS 先返回公网 IP 通过检查、
+    * 再返回内网 IP 完成实际请求。
+    *
+    * <p>所以真正建连接之前，把域名解析出来的 IP 判一遍。
+    * 代价是一次 DNS 查询，换掉一条能读内网的通道，值得。
+    */
+   checkResolved(url);
    HttpURLConnection c=(HttpURLConnection)url.openConnection();
    try{
     c.setConnectTimeout(15000);

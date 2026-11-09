@@ -214,6 +214,8 @@ static String instructions(boolean project,boolean nativeTools){
   +"开工前先写一次，做完一项改一次 done，这样长任务不会跑偏，用户也能看到进度。"
   +"\n- read_plan()：读回当前清单。"
   +"\n\n【工作流程】"
+  +"\n用户说「这个」「这里」时，先看上下文里「用户当前正在看的文件」那一条 —— "
+  +"那才是他指的东西，别反问是哪个文件。要看内容就用 read_file 读那个文件。"
   +"\n① list_files 看结构 → ② search_code 定位 → ③ read_file 读内容"
   +"\n④ patch_file / multi_patch / replace_text 改动 → ⑤ diff_mine 自查改了哪些行"
   +"\n⑥ 看自动编译结果 → ⑦ 改的是逻辑就跑 run_tests → ⑧ 有错继续修，直到通过才交付"
@@ -226,6 +228,7 @@ static String instructions(boolean project,boolean nativeTools){
   +"没列全时会明说还剩多少，那时用 prefix 缩到某个目录再看。"
   +"\nread_file(path,startLine可选,lineCount可选)：读文件；不指定范围就读整份。"
   +"只读到一部分时结果里会告诉你还剩多少行、从哪行接着读。"
+  +"注意返回内容每行开头的「行号: 」只是定位标记，不是文件内容，写回时不要带上。"
   +"\nsearch_code(query,prefix可选,glob可选,regex可选true用正则,ignoreCase可选,limit可选默认50最多200)：搜索，返回文件+行号+该行内容。"
   +"命中到上限时结果里会给 possiblyMore=true，那说明还有更多 —— 缩小 prefix/glob 或换更具体的词再搜。"
   +"例：找所有 tsx 里的某个词 → glob=\"*.tsx\"；只搜某目录 → prefix=\"src/app\"；写复杂条件 → regex=true。"
@@ -380,6 +383,12 @@ static String instructions(boolean project,boolean nativeTools){
   * 手机上直接 OOM，而这正是当初要治的毛病。
   *
   * <p>超出上限就丢掉最老的一条（{@link java.util.LinkedHashMap} 的插入序正好当队列用）。
+  *
+  * <p><b>而且表里只放指纹，不放全文。</b>之前这里存的是工具结果的完整 JSON：
+  * {@code read_file} 一个结果就能几百 KB，200 条就是几十 MB ——
+  * 上限管住了条数，管不住每条多大，等于白设上限。
+  * 现在存「长度 + 哈希」两个数，判重语义完全一样（同样的内容哈希必然相同），
+  * 内存从几十 MB 降到几十 KB。
   */
  private final java.util.LinkedHashMap<String,String> lastResult=new java.util.LinkedHashMap<String,String>(64,0.75f,true){
   protected boolean removeEldestEntry(Map.Entry<String,String> eldest){return size()>REPEAT_CACHE_CAP;}
@@ -389,6 +398,36 @@ static String instructions(boolean project,boolean nativeTools){
  };
  /** 重复调用识别表最多留多少条。够用就行 —— 真正会被反复调用的工具本来就那么几个。 */
  static final int REPEAT_CACHE_CAP=200;
+
+ /**
+  * 给一段文本算一个固定长度的指纹。
+  *
+  * <p>用途是「判断两次内容是否一样」，不需要内容本身。
+  * 长度 + 哈希就够：内容一样则长度和哈希必然一样；
+  * 反过来哈希撞了的概率极低，撞了也只是把一次重复识别当成重复，
+  * 顶多让模型少看一遍结果，不会出错。
+  *
+  * @param s 待算指纹的文本
+  * @return 形如 {@code 12345-ab12cd34} 的短字符串
+  */
+ static String fingerprint(String s){
+  if(s==null)s="";
+  return s.length()+"-"+Integer.toHexString(s.hashCode());
+ }
+
+ /**
+  * 重复调用识别表当前占用的字符数（只算指纹字符串）。
+  *
+  * <p>给自测用：这张表要是又开始存全文，这个数会蹭蹭往上涨。
+  *
+  * @return 表内所有键值对的字符总数
+  */
+ int repeatCacheChars(){
+  int n=0;
+  for(java.util.Map.Entry<String,String> e:lastResult.entrySet())n+=e.getKey().length()+e.getValue().length();
+  for(java.util.Map.Entry<String,Integer> e:sameCount.entrySet())n+=e.getKey().length()+String.valueOf(e.getValue()).length();
+  return n;
+ }
 
  /** 只读工具才做这个判断：写工具的重复调用可能有真实意图。 */
  static boolean isReadOnly(String n){
@@ -408,8 +447,9 @@ static String instructions(boolean project,boolean nativeTools){
  JSONObject callOnce(String name,JSONObject args)throws Exception{
   JSONObject r=call(name,args);
   if(!isReadOnly(name))return r;
-  String sig=name+"|"+(args==null?"{}":args.toString());
-  String now=r==null?"":r.toString();
+  /* 签名和指纹都只留固定长度，参数里可能带着整份文件清单 */
+  String sig=name+"|"+fingerprint(args==null?"{}":args.toString());
+  String now=fingerprint(r==null?"":r.toString());
   String prev=lastResult.get(sig);
   if(now.equals(prev)){
    int n=sameCount.containsKey(sig)?sameCount.get(sig)+1:2;
@@ -512,7 +552,16 @@ JSONObject call(String name,JSONObject args)throws Exception{
     StringBuilder text=new StringBuilder();
     for(int i=start-1;i<end;i++){text.append(i+1).append(": ").append(lines[i]).append('\n');}
     out.put("path",path).put("totalLines",lines.length).put("content",text.toString())
-     .put("startLine",start).put("endLine",end).put("returnedLines",end-start+1);
+     .put("startLine",start).put("endLine",end).put("returnedLines",end-start+1)
+     /*
+      * 必须明说行号不是内容。
+      *
+      * <p>read_file 的内容每行前面加了「12: 」方便定位，模型最容易犯的错
+      * 就是把它当成文件内容原样写回去 —— 于是项目里每一行多一个行号，
+      * 而这种损坏经常还能编译通过，用户只看到页面多了堆数字。
+      * 写入路径上虽然会自动剥掉，但让模型一开始就别带才是最省事的。
+      */
+     .put("note","每行开头的「行号: 」是定位标记，不是文件内容；写回时不要带上。");
     /* 只读到一部分时说明还有多少 —— 模型才知道要不要接着读。 */
     if(end<lines.length)
      out.put("note","这次只读到第 "+end+" 行，后面还有 "+(lines.length-end)
@@ -551,7 +600,16 @@ JSONObject call(String name,JSONObject args)throws Exception{
     }
     break;
    }
-   case "replace_text":String editPath=args.optString("path",""),oldText=args.optString("oldText","");
+   case "replace_text":{
+    String editPath=args.optString("path","");
+    /*
+     * 先判「有没有给路径」，再判「文件在不在」。
+     *
+     * <p>顺序反了会给出误导性的报错：模型忘传 path 时会看到
+     * 「文件不存在：」，于是它以为路径格式写错了，换个写法再试，
+     * 而真正的问题是它压根没传这个参数。
+     */
+    if(editPath.isEmpty())throw new Exception("缺少 path —— 要改哪个文件");
     /*
      * 用当前暂存区的文件。
      *
@@ -560,23 +618,58 @@ JSONObject call(String name,JSONObject args)throws Exception{
      * 不至于报「文件已变化，本轮建议未写入」。
      */
     JSONObject curFiles=staged.getJSONObject("files");
-    /*
-     * 分开报错。
-     *
-     * <p>原来合成一句「无效的精确替换参数」—— 模型看到这句话，
-     * 不知道是文件路径写错了、还是 oldText 没对上，于是换个写法再试，
-     * 于是又错。路径不存在时该直接列出项目里相近的文件名。
-     */
     if(!curFiles.has(editPath)){
      String hint=nearestFiles(curFiles,editPath);
      throw new Exception("文件不存在："+editPath
       +(hint.isEmpty()?"":"。项目里相近的文件有："+hint));
     }
-    if(editPath.isEmpty())throw new Exception("缺少 path —— 要改哪个文件");
+    String oldText=args.optString("oldText","");
     if(oldText.isEmpty())throw new Exception("oldText 不能为空 —— 要替换的原文片段");
     String newText=args.optString("newText",null);
     if(newText==null)throw new Exception("缺少 newText —— 要替换成的新内容");
-    String current=curFiles.getString(editPath);int at=current.indexOf(oldText);if(at<0||current.indexOf(oldText,at+1)>=0)throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");String replaced=current.substring(0,at)+newText+current.substring(at+oldText.length());staged=ProjectEdits.apply(staged,curFiles,new JSONObject().put(editPath,replaced),"AI 暂存");out.put("staged",true).put("path",editPath).put("replacements",1);break;
+    String current=curFiles.getString(editPath);
+    int at=current.indexOf(oldText);
+    /*
+     * oldText 对不上时，先试试「是不是带着 read_file 的行号」。
+     *
+     * <p>模型从 read_file 复制片段时，每行前面都有「12: 」。
+     * 那种片段在文件里当然找不到 —— 直接报「精确匹配一次」，
+     * 模型只会以为是自己上下文取窄了，于是重新读、重新扩大，
+     * 再贴一次还是带行号，白烧几轮而且最后失败。
+     *
+     * <p>所以先剥一次再匹配。能匹配上就用剥过的继续走，
+     * 并在结果里说明「你的 oldText 带了行号，已自动剥掉」——
+     * 让模型知道下次别带。
+     */
+    boolean strippedOld=false;
+    if(at<0||current.indexOf(oldText,at+1)>=0){
+     String maybe=stripSnippetLineNumbers(oldText);
+     if(!maybe.equals(oldText)){
+      int at2=current.indexOf(maybe);
+      if(at2>=0&&current.indexOf(maybe,at2+1)<0){at=at2;oldText=maybe;strippedOld=true;}
+     }
+    }
+    if(at<0||current.indexOf(oldText,at+1)>=0)
+     throw new Exception("替换片段必须在当前文件中精确匹配一次，请先读取并扩大上下文");
+    /*
+     * newText 里的行号同样要剥，否则替换进去的就是带行号的代码。
+     *
+     * <p>这里能给出精确到行的判据：newText 从 oldText 的位置开始，
+     * 所以数一下 at 之前有几个换行，就知道这段在文件里是第几行。
+     * 单行替换时「这一行的行号正好等于起始行」就足以认定是行号副本 ——
+     * 光看一行内容本来判不出来，有了位置这个外部线索就能判。
+     */
+    int editLine=1;
+    for(int k=0;k<at;k++)if(current.charAt(k)=='\n')editLine++;
+    String cleanedNew=stripSnippetLineNumbers(newText,editLine);
+    String replaced=current.substring(0,at)+cleanedNew+current.substring(at+oldText.length());
+    ProjectEdits.stage(staged,new JSONObject().put(editPath,replaced));
+    out.put("staged",true).put("path",editPath).put("replacements",1);
+    if(strippedOld||!cleanedNew.equals(newText))
+     out.put("strippedLineNumbers",true)
+      .put("notice","oldText/newText 里带着 read_file 的行号前缀（例如「12: 」），已自动剥掉；以后直接给原文即可。");
+    break;
+   }
    case "patch_file":out.put("result",patchFile(staged.getJSONObject("files"),args));break;
    /*
     * 批量局部改：一次调用改多个文件的多个位置。
@@ -657,8 +750,32 @@ JSONObject call(String name,JSONObject args)throws Exception{
      catch(Exception e){throw new Exception("files 不是对象。请写成 {路径:内容} 这样的对象，"
       +"不要把整个对象再包成字符串。你发来的原文开头是："+rawFiles.substring(0,Math.min(120,rawFiles.length())));}
     }
-    staged=ProjectEdits.apply(staged,staged.getJSONObject("files"),wfFiles,"AI 暂存");
+    /*
+     * 剥掉模型从 read_file 结果里带回来的行号前缀。
+     *
+     * <p>模型最常见的动作是「读出来 → 改两行 → 整份写回」，
+     * 而 read_file 的内容每行都带 {@code 12: } 这样的定位信息。
+     * 不剥的话，文件每一行前面会多一个 {@code N: }，
+     * 而且这种损坏经常能编译通过，用户只会看到页面多出一堆数字。
+     *
+     * <p>剥的时候要在结果里说一声，模型才知道自己带回了行号 ——
+     * 不说的话它会以为文件本来就这样，下次继续照原样写。
+     */
+    JSONArray stripped=new JSONArray();
+    for(Iterator<String> it=wfFiles.keys();it.hasNext();){
+     String n=it.next();
+     Object v=wfFiles.opt(n);
+     if(!(v instanceof String))continue;
+     String raw=(String)v;
+     String clean=stripLineNumbers(raw);
+     if(!clean.equals(raw)){wfFiles.put(n,clean);stripped.put(n);}
+    }
+    ProjectEdits.stage(staged,wfFiles);
     out.put("staged",true).put("message","暂存文件已校验，最终成功后写回项目");
+    if(stripped.length()>0)
+     out.put("strippedLineNumbers",stripped)
+      .put("notice","我检查到这些文件的内容里每一行都带「行号: 」前缀，那是 read_file 返回的定位信息、不是文件内容，已经去掉后再写入。"
+       +"下次读文件后改完，直接把行号前缀去掉，或者改用 patch_file 只改指定几行。");
     break;}
    case "check_project":return LocalCompiler.check(a,staged);
    case "run_preview":CountDownLatch opened=new CountDownLatch(1);String[] failure={null};a.runOnUiThread(()->{try{if(a.localRunner!=null&&a.localRunner.dialog!=null)a.localRunner.dialog.dismiss();a.localRunner=new LocalRunner(a,staged);a.localRunner.start();}catch(Exception e){failure[0]=e.getMessage();}finally{opened.countDown();}});if(!opened.await(10,TimeUnit.SECONDS))throw new Exception("预览打开超时");if(failure[0]!=null)throw new Exception(failure[0]);out.put("opened",true).put("message","已打开离线预览，编译/运行日志可用get_debug_reports读取；打开不代表交互验收通过");break;
@@ -1078,6 +1195,24 @@ JSONObject call(String name,JSONObject args)throws Exception{
   boolean endLineClamped=endLineArg>0&&endLineArg<=start;
   if(start>lineCount)throw new Exception("起始行 "+start+" 超出文件行数 "+lineCount);
 
+  /*
+   * newContent 也可能带着 read_file 的行号前缀。
+   *
+   * <p>模型经常是「照着读到的第 12 行改」，于是把「12: xxx」整段贴进 newContent。
+   * 这里剥掉 —— 判据同样严格：整段都符合「数字: 」且连续递增才动。
+   * 一段真实的代码不可能长成这样。
+   *
+   * <p><b>但有一类文件本来就长这样。</b>数据文件、清单、导出的编号列表，
+   * 每一行就是「行号: 内容」。对它们剥号等于把内容改坏。
+   * 判据很简单：要改的这一行现在自己就写成「这一行的行号: …」，
+   * 那说明文件本身带行号，一个字符都别动。
+   */
+  boolean numberedFile=false;
+  if(start<=list.size()){
+   String currentLine=list.get(start-1);
+   numberedFile=currentLine.startsWith(start+": ");
+  }
+  if(!numberedFile)newContent=stripSnippetLineNumbers(newContent,start);
   // newContent 末尾的换行是格式噪音，去掉，否则会多出空行
   String nc=newContent;
   while(nc.endsWith("\n"))nc=nc.substring(0,nc.length()-1);
@@ -1094,7 +1229,7 @@ JSONObject call(String name,JSONObject args)throws Exception{
   if(trailingNewline&&!result.isEmpty())sb.append('\n');
   String replaced=sb.toString();
 
-  staged=ProjectEdits.apply(staged,files,new JSONObject().put(path,replaced),"AI 暂存");
+  ProjectEdits.stage(staged,new JSONObject().put(path,replaced));
   // 回显改动前的原文，模型能自己确认改对了地方
   StringBuilder before=new StringBuilder();
   for(int i=start-1;i<Math.min(endExclusive-1,start-1+8)&&i<list.size();i++)before.append(list.get(i)).append('\n');
@@ -1258,5 +1393,183 @@ JSONObject call(String name,JSONObject args)throws Exception{
   return sb.toString();
  }
 
- JSONObject finalChanges(JSONObject changes)throws Exception{JSONObject next=ProjectEdits.apply(staged,staged.getJSONObject("files"),changes,"AI 暂存").getJSONObject("files"),old=original.getJSONObject("files"),out=new JSONObject();for(Iterator<String> it=next.keys();it.hasNext();){String n=it.next();if(!next.getString(n).equals(old.optString(n,null)))out.put(n,next.getString(n));}for(Iterator<String>it=old.keys();it.hasNext();){String n=it.next();if(!next.has(n))out.put(n,JSONObject.NULL);}return out;}
+ /**
+  * 去掉模型从 read_file 结果里带回来的行号前缀。
+  *
+  * <p><b>为什么需要：</b>read_file 返回的内容每行都带 {@code "12: "} 这样的行号，
+  * 那是给人读的定位信息，不是文件内容。而模型最常见的动作就是
+  * 「读出来 → 改两行 → 整份写回去」—— 它往往不会自己删掉那些前缀。
+  *
+  * <p>结果就是把行号写进项目文件：每一行前面多一个 {@code N: }。
+  * 更糟的是这东西往往还能编译通过（在 JS 里就是一句标签 + 表达式），
+  * 用户看到的现象是「页面多了一堆乱七八糟的数字」，查半天查不出原因。
+  *
+  * <p><b>判据要严，宁可漏剥也不能错剥：</b>只有当
+  * <ol>
+  *   <li>所有非空行都以 {@code 数字: } 开头，</li>
+  *   <li>而且这些数字恰好是从 1 开始连续递增的</li>
+  * </ol>
+  * 才认定这是带行号的副本。真实代码里不会出现这种严格递增的行号前缀，
+  * 所以不会误伤正常内容。
+  *
+  * @param content 模型交回来的内容
+  * @return 剥离后的内容；不像行号副本时原样返回
+  */
+ static String stripLineNumbers(String content){
+  if(content==null||content.isEmpty())return content;
+  String[] lines=content.split("\n",-1);
+  java.util.regex.Pattern p=java.util.regex.Pattern.compile("^(\\d+): (.*)$");
+  int expect=1,checked=0;
+  for(String line:lines){
+   if(line.isEmpty())continue;
+   java.util.regex.Matcher m=p.matcher(line);
+   if(!m.matches())return content;
+   if(Integer.parseInt(m.group(1))!=expect)return content;
+   expect++;checked++;
+  }
+  /* 少于两行不值得判断，也可能只是内容里恰好有个「1: 」开头 */
+  if(checked<2)return content;
+  StringBuilder sb=new StringBuilder();
+  for(int i=0;i<lines.length;i++){
+   if(lines[i].isEmpty()){sb.append('\n');continue;}
+   java.util.regex.Matcher m=p.matcher(lines[i]);
+   if(m.matches())sb.append(m.group(2));
+   sb.append('\n');
+  }
+  String out=sb.toString();
+  /* 原内容末尾没有换行的话，这里补出来的要收回去 */
+  if(!content.endsWith("\n")&&out.endsWith("\n"))out=out.substring(0,out.length()-1);
+  return out;
+ }
+
+ /**
+  * 片段版的行号剥离，给 {@code patch_file} 的 newContent 用。
+  *
+  * <p>整份剥离要求行号从 1 开始，因为整份文件的第 1 行就是第 1 行。
+  * 但模型改文件时改的往往是中间几行 —— 它读到的片段是
+  * {@code 12: xxx / 13: yyy}，起始值不是 1。用整份的判据去判，
+  * 这批行号<b>一个都剥不掉</b>，直接写进项目。
+  *
+  * <p>所以这里只要求「数字连续严格递增」，起始值任意。
+  * 代价是一段恰好每行都长成 {@code 5: …/6: …/7: …} 的真实内容会被误剥，
+  * 但那本身就是行号副本的样子 —— 误剥一次用户看得见，
+  * 写进行号却常常编译通过、极难发现，两害相权取轻。
+  *
+  * @param content 片段内容
+  * @return 剥离后的内容；不像行号副本时原样返回
+  */
+ static String stripSnippetLineNumbers(String content){
+  return stripSnippetLineNumbers(content,0);
+ }
+
+ /**
+  * 带位置提示的片段剥离。
+  *
+  * <p>单行内容光看格式判不出来（{@code "5: 说明"} 可能是正常的 YAML 键），
+  * 但 {@code patch_file} 知道自己要改的是第几行 —— 如果模型交给我们的
+  * 那一行开头恰好是这个行号，那就不是巧合了，剥。
+  *
+  * @param hintStart 这一段在文件中的起始行号；0 表示不知道
+  */
+ static String stripSnippetLineNumbers(String content,int hintStart){
+  if(content==null||content.isEmpty())return content;
+  String[] lines=content.split("\n",-1);
+  java.util.regex.Pattern p=java.util.regex.Pattern.compile("^(\\d+): (.*)$");
+  int expect=-1,checked=0,firstNo=-1;
+  for(String line:lines){
+   if(line.isEmpty())continue;
+   java.util.regex.Matcher m=p.matcher(line);
+   if(!m.matches())return content;
+   int n=Integer.parseInt(m.group(1));
+   if(firstNo<0)firstNo=n;
+   if(expect>=0&&n!=expect)return content;
+   expect=n+1;checked++;
+  }
+  /* 只有一行时，只能靠「行号正好等于这段的起始行」这个外部线索来判断 */
+  if(checked<2&&!(checked==1&&hintStart>0&&firstNo==hintStart))return content;
+  StringBuilder sb=new StringBuilder();
+  for(String line:lines){
+   if(line.isEmpty()){sb.append('\n');continue;}
+   java.util.regex.Matcher m=p.matcher(line);
+   if(m.matches())sb.append(m.group(2));
+   sb.append('\n');
+  }
+  String out=sb.toString();
+  if(!content.endsWith("\n")&&out.endsWith("\n"))out=out.substring(0,out.length()-1);
+  return out;
+ }
+
+ /** 记录一次「行号前缀被剥掉」的事，好在工具结果里告诉模型。 */
+ static boolean looksNumbered(String content){
+  if(content==null)return false;
+  return !content.equals(stripLineNumbers(content));
+ }
+
+/**
+  * 算出「本轮暂存区相对项目起点改了哪些文件」。
+  *
+  * <p>返回的表直接交给 MainActivity 当改动集合用：值是新内容，
+  * 文件被删掉的值是 {@link JSONObject#NULL}。
+  *
+  * <p><b>这里绝不能绕道 {@code ProjectEdits.apply()}。</b>
+  * apply() 是<b>提交</b>路径：它要跑路径校验、按项目规模校验、
+  * 按云端协议校验，还要往 history 里写一条、往 snapshots 里塞一份存档。
+  * 只是「算个差异」而已，用不着这一整套，而且副作用很明显：
+  * <ul>
+  *   <li>它会把一份空改动当成一次提交记进历史；</li>
+  *   <li>更糟的是校验会<b>抛异常</b> —— 老项目里只要有一个不合规的
+  *       历史路径（比如早期版本留下的 {@code a//b}），
+  *       差分这一步就整段失败，而调用方外面套着
+  *       {@code catch(Exception ignore){}}，异常被静默吞掉，
+  *       stagedFiles 于是<b>根本不会挂到结果上</b>。</li>
+  * </ul>
+  * 用户看到的正是最莫名其妙的那种现象：AI 说「改好了」，
+  * 项目却一个字都没变，日志里也没有任何错误。
+  *
+  * <p>所以差异就老老实实比两张文件表，纯读、无副作用、不会失败。
+  *
+  * @param changes 保留参数以兼容调用方（此实现不再需要它）
+  */
+ JSONObject finalChanges(JSONObject changes)throws Exception{
+  /*
+   * 有 changes 就先合进暂存副本，再算差异。
+   *
+   * <p><b>这一步不能省。</b>降级路径（服务端不支持原生 function calling）下，
+   * 模型是把整个 files 对象写进正文的 —— 那些内容不在暂存区里，
+   * 只有靠这里合进去，后面的差异才看得见它们。
+   *
+   * <p>合并走 ProjectEdits.stage：路径校验、内容校验、cloudSource 规则
+   * 一个不少，只是不产生快照和历史（那是提交阶段的事）。
+   */
+  if(changes!=null&&changes.length()>0){
+   /*
+    * 降级路径同样要剥行号前缀。
+    *
+    * <p>这条路是模型把整个 files 写进正文 —— 它刚 read_file 过，
+    * 手上那份内容就是带行号的。不剥就把行号一起写进项目。
+    */
+   for(Iterator<String> it=changes.keys();it.hasNext();){
+    String n=it.next();
+    Object v=changes.opt(n);
+    if(v instanceof String)changes.put(n,stripLineNumbers((String)v));
+   }
+   ProjectEdits.stage(staged,changes);
+  }
+  JSONObject next=staged.getJSONObject("files");
+  JSONObject old=original==null?null:original.optJSONObject("files");
+  JSONObject out=new JSONObject();
+  if(old==null){for(Iterator<String> it=next.keys();it.hasNext();){String n=it.next();out.put(n,next.optString(n,""));}return out;}
+  for(Iterator<String> it=next.keys();it.hasNext();){
+   String n=it.next();
+   String now=next.optString(n,"");
+   /* 起点没有这个文件，或者内容变了 —— 都算本轮改动 */
+   if(!old.has(n)||!now.equals(old.optString(n,"")))out.put(n,now);
+  }
+  /* 起点有、现在没有 —— 本轮删掉了，用 NULL 表示删除 */
+  for(Iterator<String> it=old.keys();it.hasNext();){
+   String n=it.next();
+   if(!next.has(n))out.put(n,JSONObject.NULL);
+  }
+  return out;
+ }
 }

@@ -245,6 +245,26 @@ final class GitHubTool {
     skipped.put(new JSONObject().put("path",path).put("reason","二进制文件"));
     continue;
    }
+   /*
+    * 敏感文件一律不上传。
+    *
+    * <p>这是「上传项目到 GitHub」最危险的一个口子：项目里往往躺着
+    * .env、keystore、签名配置、还有写着 API Key 的配置文件。
+    * 它们是纯文本，isText 拦不住；体积也不大，FILE_CAP 也拦不住。
+    * 于是密钥跟着代码一起进了仓库 ——
+    * 哪怕仓库默认私有，日后有人转公开、或者有协作者有读权限，
+    * 密钥就等于公开了。而 GitHub 的密钥扫描一旦命中还会通知所有人。
+    *
+    * <p>所以这里按文件名和内容两条线拦：
+    *   · 文件名命中敏感清单（.env、keystore、签名文件、常见私钥后缀）
+    *   · 内容里出现明显的密钥赋值（api_key = "..."、BEGIN PRIVATE KEY）
+    * 拦下来的放进 skipped，随结果一起告诉用户「哪些没上传、为什么」。
+    */
+   String secretReason=secretReason(path,content);
+   if(secretReason!=null){
+    skipped.put(new JSONObject().put("path",path).put("reason",secretReason));
+    continue;
+   }
    String sha=blobSha(bytes);
    if(sha.equals(remote.get(path))){unchanged++;continue;}
    /*
@@ -279,7 +299,8 @@ final class GitHubTool {
   if(treeEntries.length()==0&&created){
    // 新仓库 auto_init 已经有内容，本地又全都一样 —— 没什么可提交的
    return new JSONObject().put("ok",true).put("repo",full).put("htmlUrl","https://github.com/"+full)
-    .put("created",true).put("uploaded",0).put("unchanged",unchanged).put("stale",staleFiles)
+    .put("created",true).put("uploaded",0).put("unchanged",unchanged)
+    .put("skipped",skipped).put("stale",staleFiles)
     .put("note","仓库已创建，本地文件与远端一致，没有需要提交的改动");
   }
   if(treeEntries.length()==0){
@@ -325,6 +346,75 @@ final class GitHubTool {
   s=s.replaceAll("[^a-z0-9._-]+","-").replaceAll("-+","-").replaceAll("^[-.]+|[-.]+$","");
   if(s.isEmpty())s="stepx-project";
   return s.length()>90?s.substring(0,90):s;
+ }
+
+ /**
+  * 判断一个文件是不是「不该上传的敏感文件」。
+  *
+  * <p>返回原因字符串；返回 null 表示可以上传。
+  *
+  * <p>两条线：
+  * <ol>
+  * <li>文件名命中敏感清单 —— .env、签名材料、常见私钥后缀。</li>
+  * <li>内容里出现密钥赋值 —— 有些项目把密钥写在 config.json 这种
+  * 看起来无害的文件里，光看文件名拦不住。</li>
+  * </ol>
+  *
+  * <p>内容这条线宁可多拦一点：宁可漏传一个配置文件，
+  * 也不能把密钥传上去。用户在 skipped 列表里能看见被拦了什么。
+  */
+ static String secretReason(String path,String content){
+  String p=(path==null?"":path).toLowerCase(java.util.Locale.ROOT);
+  String name=p;
+  int slash=Math.max(p.lastIndexOf('/'),p.lastIndexOf('\\'));
+  if(slash>=0)name=p.substring(slash+1);
+  /* 敏感文件名 */
+  String[] sensitiveNames={".env",".env.local",".env.production",".env.development",
+   ".npmrc",".pypirc",".netrc","credentials","secrets.json","secrets.yaml",
+   "keystore","keystore.properties","signing.properties","local.properties",
+   "id_rsa","id_dsa","id_ecdsa","id_ed25519","service-account.json"};
+  for(String s:sensitiveNames)if(name.equals(s))return "敏感文件（可能含密钥或签名材料），已跳过上传";
+  /* 敏感后缀 */
+  String[] sensitiveEnds={".pem",".key",".p12",".pfx",".jks",".keystore",".ppk"};
+  for(String s:sensitiveEnds)if(name.endsWith(s))return "密钥/证书文件（."+s.substring(1)+"），已跳过上传";
+  /* 常见密钥目录 */
+  if(p.startsWith(".git/")||p.contains("/.git/")||p.startsWith(".ssh/")||p.contains("/.ssh/"))
+   return "版本控制/密钥目录内的文件，已跳过上传";
+  /*
+   * 内容这条线：只看赋值形式，不看单词出现。
+   * 单纯出现 "secret" 这个词太常见，会误伤正常代码。
+   */
+  if(content!=null){
+   String lower=content.toLowerCase(java.util.Locale.ROOT);
+   if(lower.contains("-----begin private key-----")||lower.contains("-----begin rsa private key-----")
+    ||lower.contains("-----begin openssh private key-----")||lower.contains("-----begin ec private key-----"))
+    return "内容里含私钥，已跳过上传";
+   String[] patterns={
+    /*
+     * 键名可以带引号（JSON 写法），也可以不带（.env / YAML 写法）。
+     * 所以每条模式都写成「可选引号 + 键名 + 可选引号」。
+     * 早先只匹配不带引号的键名，JSON 里的 api_key 全漏了。
+     */
+    "\"?api[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?secret[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?access[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?refresh[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?client[_-]?secret\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?private[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?auth[_-]?token\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?password\"?\s*[=:]\s*[\"'][^\"'\s]{8,}",
+    "\"?aws[_-]?secret[_-]?access[_-]?key\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?secret\"?\s*[=:]\s*[\"'][^\"'\s]{12,}",
+    "\"?token\"?\s*[=:]\s*[\"'][^\"'\s]{16,}"
+};
+
+
+   for(String pat:patterns){
+    try{if(java.util.regex.Pattern.compile(pat,java.util.regex.Pattern.CASE_INSENSITIVE).matcher(content).find())
+     return "内容里疑似有密钥，已跳过上传";}catch(Exception ignored){}
+   }
+  }
+  return null;
  }
 
  /** 进度回调。在后台线程里被调用，实现方自己负责切主线程。 */

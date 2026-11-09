@@ -1038,7 +1038,17 @@ final class DevAgent {
    * 就摘掉 tools、回到旧的文本 JSON 协议，并且记下来 —— 下次直接用旧协议，
    * 不用每次都试错一次。
    */
-  boolean nativeTools=!a.isNoNativeTools(profile.optString("id",""));
+  /*
+   * 本地离线模型没有 function calling，一开始就该走文本 JSON 协议。
+   *
+   * <p>不判这个的话，本地模型会被挂上一整套 tools 定义：
+   * 提示词说「直接调工具」，可本地引擎根本不会调，
+   * 模型于是只输出一段人话，一个文件都没改 —— 用户以为它偷懒。
+   *
+   * <p>而且 LocalAiClient 的 6 参数 request 会忽略 tools 直接生成，
+   * 两边说法必须对齐，模型才知道要用 JSON 把工具请求写进正文。
+   */
+  boolean nativeTools=!"local".equals(protocol)&&!a.isNoNativeTools(profile.optString("id",""));
   /* 连续全败计数：见 MAX_CONSECUTIVE_FAIL_ROUNDS 的说明。 */
   int consecutiveFailRounds=0;
   JSONArray toolDefs=nativeTools?ToolSchema.forProtocol(protocol):null;
@@ -1179,10 +1189,18 @@ final class DevAgent {
    if(nativeTools){
     JSONArray nativeCalls=response.optJSONArray("toolCalls");
     if(nativeCalls==null||nativeCalls.length()==0){
-     // 模型直接给了答案 —— 结束循环
-     if(response.optBoolean("incomplete")&&project!=null){}
+     /* 模型直接给了答案 —— 结束循环 */
      break;
     }
+    /*
+     * 输出被截断的轮次，工具调用一律不执行。
+     *
+     * <p>参数虽然可能补全过、能解析，但断掉的内容没回来 ——
+     * 尤其写文件类工具，会把半截内容当成完整文件写进项目，
+     * 还回一句「写入成功」。这种损坏编译往往能过，极难发现。
+     *
+     * <p>代价是这一轮白跑，但比写坏用户的文件便宜得多。
+     */
     if(response.optBoolean("incomplete"))break;
     JSONArray results=new JSONArray();
     /* 本轮有没有工具成功 —— 用来判断是不是「整轮全败」。 */
@@ -1516,7 +1534,17 @@ final class DevAgent {
    try{
     JSONObject stagedChanges=tools.finalChanges(new JSONObject());
     if(stagedChanges.length()>0)response.put("stagedFiles",stagedChanges);
-   }catch(Exception ignore){}
+   }catch(Exception diffError){
+    /*
+     * 算差异失败不能让这一轮白干，但也不能一声不吭。
+     *
+     * <p>静默吞掉的后果是：模型明明改了文件，stagedFiles 却没挂上，
+     * 用户看到「AI 说改好了、项目没变」，日志里干干净净，
+     * 只能靠猜。至少把原因留在 logcat 里，出问题能查到。
+     */
+    android.util.Log.e("NeoAgent","算暂存差异失败，本轮改动可能丢失",diffError);
+    response.put("diffError",safeParseError(diffError));
+   }
   }
   /*
    * 模型没给文字时，补一句人话。

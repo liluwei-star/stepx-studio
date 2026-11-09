@@ -14,9 +14,68 @@ import json
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def do_POST(self):
-  data=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  # 必须按 UTF-8 解码。请求体里有中文（system 提示词、项目名），
+  # 而 json.loads 对 bytes 会用 detect_encoding 去猜 ——
+  # 在中文 Windows 上它会按 GBK 解，碰到字节序列就抛 UnicodeDecodeError。
+  #
+  # 这个异常的杀伤力在于：它发生在 handler 里，连接被直接掐断，
+  # 设备端只看到一句 "unexpected end of stream"，
+  # 完全看不出是服务端解码问题 —— 排查成本极高。
+  raw_body=self.rfile.read(int(self.headers['Content-Length']))
+  try:
+   data=json.loads(raw_body.decode('utf-8'))
+  except Exception as e:
+   self.send_response(400);self.send_header('Content-Type','application/json');self.end_headers()
+   self.wfile.write(json.dumps({'error':'request body is not valid UTF-8 JSON','detail':str(e),'preview':raw_body[:200].decode('utf-8',errors='replace')}).encode());return
   # 断言失败会让连接直接断掉，设备端只看到 "unexpected end of stream"，看不出原因。
   # 所以把关键检查改成明确的报错响应，而不是裸 assert。
+  # ── 概览探针端点（端口 8770）────────────────────────────
+  #
+  # 自测里有一条「项目概览真的进了系统提示词」的断言。
+  # 它的验证方式就是问模型「这个项目有多少个文件？」——
+  # 如果模型能答出真实文件数，说明概览确实在提示词里；
+  # 答不出，说明概览没进去。
+  #
+  # 所以这里要读收到的 system 提示词，数出「【当前项目】」那一段里的文件条数，
+  # 再把答案原样说出来。模型答对了 = 概览进了提示词。
+  if data.get('model')=='overview-probe':
+    if data.get('stream') is not False:
+      self.send_response(400);self.send_header('Content-Type','application/json');self.end_headers()
+      self.wfile.write(json.dumps({'error':'overview model/stream mismatch','got':{'model':data.get('model'),'stream':data.get('stream')}}).encode());return
+    # system 的位置随协议不同：
+    #   Anthropic 走顶层 system 字段；
+    #   OpenAI 兼容协议是 messages[0] = {role:system, content:...}。
+    # 只读顶层字段的话，兼容协议永远拿不到提示词 —— 探针恒返回 400，
+    # 设备端只看到一句「模型参数或上下文超限」，完全指不到这里。
+    sys_txt=data.get('system')
+    if not isinstance(sys_txt,str) or not sys_txt:
+      msgs=data.get('messages') or []
+      for m in msgs:
+        if isinstance(m,dict) and m.get('role')=='system':
+          c=m.get('content')
+          sys_txt=c if isinstance(c,str) else json.dumps(c,ensure_ascii=False)
+          break
+    if not isinstance(sys_txt,str) or not sys_txt:
+      self.send_response(400);self.send_header('Content-Type','application/json');self.end_headers()
+      self.wfile.write(json.dumps({'error':'overview system missing','keys':list(data.keys())}).encode());return
+    # 概览段落：LocalDevTools.overview() 生成的文本里，每个文件一行。
+    # 数「有 N 个文件」这句，找不到就说明概览没进提示词。
+    import re as _re
+    m=_re.search(r'共\s*(\d+)\s*个文件', sys_txt)
+    if not m:
+      # 换个说法：直接数概览区里的路径行
+      seg=sys_txt
+      idx=sys_txt.find('【当前项目】')
+      if idx>=0: seg=sys_txt[idx:idx+4000]
+      paths=set(_re.findall(r'([\w./-]+\.(?:html|css|js|ts|tsx|jsx|json|md|txt|svg|png|jpg))', seg))
+      answer='OVERVIEW_MISSING' if not paths else 'OVERVIEW_OK 共 %d 个文件'%len(paths)
+    else:
+      answer='OVERVIEW_OK 共 %s 个文件'%m.group(1)
+    print('OVERVIEW SYSTEM SAMPLE:',sys_txt[:800].replace('\n',' | '),flush=True)
+    print('OVERVIEW ANSWER:',answer,flush=True)
+    r={'choices':[{'message':{'content':answer}}],'usage':{'prompt_tokens':10,'completion_tokens':5}}
+    self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(r).encode());return
+
   if data.get('model')!='fixture' or data.get('stream') is not False:
    self.send_response(400);self.send_header('Content-Type','application/json');self.end_headers()
    self.wfile.write(json.dumps({'error':'model/stream mismatch','got':{'model':data.get('model'),'stream':data.get('stream')}}).encode());return
@@ -182,4 +241,12 @@ class Handler(BaseHTTPRequestHandler):
    self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(r).encode());return
 
   self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(r).encode())
+def serve(port):
+  ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
+
+# 8768：通用 fixture 端点（模型、工具协议、Anthropic 等）
+# 8770：概览探针端点 —— 分开是因为它对 model 名和 system 的检查更严，
+#       混在一起的话通用端点的请求会被误判。
+import threading
+threading.Thread(target=serve,args=(8770,),daemon=True).start()
 ThreadingHTTPServer(('127.0.0.1',8768),Handler).serve_forever()

@@ -74,9 +74,23 @@ final class ProjectEdits {
   if(files.length()>cap)throw new Exception("本次修改涉及 "+files.length()+" 个文件，超过本项目允许的 "+cap+" 个");
   if(files.toString().length()>24*1024*1024)throw new Exception("本次修改内容过大（超过 24 MB），请分批处理");
   if(!(files.opt("index.html") instanceof String))throw new Exception("必须保留 index.html 入口");
+  /*
+   * 只查「这次被改到」的文件，不查项目里原有的。
+   *
+   * <p>这里原来把整张合并后的表逐个校验，于是只要项目里<b>已经存在</b>
+   * 一个扩展名不在白名单里的文件（导入的 .csv、.xml、.py、.webp，
+   * 或者早期版本留下的怪路径），这个项目就<b>从此再也改不动</b> ——
+   * AI 每次动手都收到「无效的文本文件路径：data.csv」，
+   * 而它压根没碰过那个文件，改也改不掉，只能反复重试。
+   *
+   * <p>要防的是「AI 写进不该写的路径」，不是「用户项目里本来有什么」。
+   * 内容没变的文件跳过：那不是我这次引入的。
+   */
   Iterator<String> it=files.keys();
   while(it.hasNext()){
    String n=it.next();
+   if(base!=null&&base.has(n)
+    &&String.valueOf(base.opt(n)).equals(String.valueOf(files.opt(n))))continue;
    // 允许的扩展名：补上 ts/tsx/jsx/mjs，这些是本机编译器真正支持的
    if(!n.matches("[\\p{L}\\p{N}_-][\\p{L}\\p{N} ._/-]{0,199}")||n.contains("..")
     ||!n.matches("(?i).+\\.(html|css|js|jsx|mjs|ts|tsx|json|md|txt|svg)")
@@ -92,26 +106,98 @@ final class ProjectEdits {
   * @param files 文件集合
   */
  static void validate(JSONObject files)throws Exception{validate(files,null);}
+ /**
+  * 把改动合进「暂存副本」，只动文件内容，不产生任何提交副作用。
+  *
+  * <p><b>为什么需要它：</b>AI 走工具路径改文件时（write_files / patch_file /
+  * multi_patch / replace_text），改的是本轮内存里的暂存副本。
+  * 这本该是纯计算，可原来它调的是 {@link #apply} —— 那是<b>提交</b>语义：
+  * 往里塞一份差量快照、写一条 history、刷新 updated 时间戳。
+  *
+  * <p>于是一个 40 轮的工具循环，每改一次文件就往暂存副本里堆一份快照、
+  * 记一条历史。看着只是浪费内存，实际后果更直接：
+  * <ul>
+  *   <li>暂存副本的快照列表被工具调用刷满，真正该保留的
+  *       「AI 动手之前」那份快照被挤出裁剪窗口；</li>
+  *   <li>history 里全是「AI 暂存 · 1 个文件」这种中间态记录，
+  *       用户翻项目历史根本找不到自己关心的事；</li>
+  *   <li>体积白白翻几倍，手机上直接吃内存。</li>
+  * </ul>
+  *
+  * <p>所以拆成两段：{@code stage} 只合并 + 校验，{@code apply} 在它之上加提交副作用。
+  * 校验一步不少 —— 路径、内容类型、neo-matrix、云端协议、项目规模，
+  * 与提交路径完全同一套，只是不落快照、不写历史。
+  *
+  * @param project 暂存副本（会被就地修改）
+  * @param changes 本次改动：路径 → 新内容；值为 null 表示删除该文件
+  */
+ static void stage(JSONObject project,JSONObject changes)throws Exception{
+  if(project==null)throw new Exception("没有可修改的项目");
+  if(changes==null||changes.length()==0)return;
+  JSONObject base=project.getJSONObject("files");
+  JSONObject next=mergeChecked(project,base,changes);
+  if(!same(next,base))project.put("files",next);
+ }
+
+ /**
+  * 合并 + 全套校验，返回合并后的文件表（不改入参）。
+  *
+  * @param project 项目对象，用于读取 cloudSource 等属性，可为 null
+  * @param base    改动前的文件表
+  * @param changes 改动集合
+  */
+ static JSONObject mergeChecked(JSONObject project,JSONObject base,JSONObject changes)throws Exception{
+  JSONObject next=new JSONObject(base.toString());
+  Iterator<String> it=changes.keys();
+  while(it.hasNext()){
+   String n=it.next();
+   if(changes.isNull(n)){
+    if(!next.has(n))throw new Exception("不能删除不存在的文件："+n);
+    next.remove(n);
+   }else{
+    if(!(changes.get(n) instanceof String))throw new Exception("文件内容必须是文本");
+    next.put(n,changes.getString(n));
+   }
+  }
+  if(next.has("neo-matrix.json"))cn.com.scsxrkj.matrix.MatrixSpec.parse(next.getString("neo-matrix.json"));
+  /*
+   * 本轮改动的路径要按云端那套标准再过一遍。
+   *
+   * <p>之前这两套标准各写各的，结果是同一个路径本地能存、云端不能 —
+   * 比如 {@code a//b}（中间空段）本地正则放行，同步时被 CloudFiles.path 拒掉，
+   * 用户看到的却是「同步不包含此路径」，完全不知道是哪个文件、为什么。
+   *
+   * <p>路径规则只该有一份。统一成 CloudFiles.path 之后，
+   * 本地存进去的东西一定能同步出去。
+   *
+   * <p>只查<b>本轮改动的文件</b>，不查项目里原有的 —
+   * 老项目要是本来就有几个怪路径，不该让 AI 从此再也改不动它。
+   */
+  for(Iterator<String> ci=changes.keys();ci.hasNext();){
+   String cn=ci.next();
+   if(!CloudFiles.path(cn))throw new Exception("路径不合法（不能以 / 开头，不能含 .. 或空段，每段要有内容）："+cn);
+  }
+  if(project!=null&&project.optBoolean("cloudSource")){
+   /*
+    * 只装 CloudFiles.entries 真正会读的两个字段。
+    *
+    * <p>原来这里是把整个项目复制一份再换掉 files —— 而 entries 只看
+    * {@code files} 和 {@code binaryFiles}。一个几十 MB 的项目，
+    * 每调用一次改文件的工具就白复制一遍全量数据，
+    * 四十轮工具循环下来是几十次无谓的全量拷贝，手机上直接吃内存。
+    */
+   JSONObject temp=new JSONObject().put("files",next);
+   Object binaries=project.opt("binaryFiles");
+   if(binaries!=null)temp.put("binaryFiles",binaries);
+   CloudFiles.entries(temp);
+  }else validate(next,base);
+  return next;
+ }
+
  static JSONObject apply(JSONObject p,JSONObject base,JSONObject changes,String source)throws Exception{
   if(!same(p.getJSONObject("files"),base))throw new Exception("文件已变化，本轮建议未写入；请基于最新文件重新发送");
-  JSONObject next=new JSONObject(base.toString());Iterator<String> it=changes.keys();while(it.hasNext()){String n=it.next();if(changes.isNull(n)){if(!next.has(n))throw new Exception("不能删除不存在的文件："+n);next.remove(n);}else{if(!(changes.get(n) instanceof String))throw new Exception("文件内容必须是文本");next.put(n,changes.getString(n));}}if(next.has("neo-matrix.json"))cn.com.scsxrkj.matrix.MatrixSpec.parse(next.getString("neo-matrix.json"));/*
-    * 本轮改动的路径要按云端那套标准再过一遍。
-    *
-    * <p>之前这两套标准各写各的，结果是同一个路径本地能存、云端不能 ——
-    * 比如 {@code a//b}（中间空段）本地正则放行，同步时被 CloudFiles.path 拒掉，
-    * 用户看到的却是「同步不包含此路径」，完全不知道是哪个文件、为什么。
-    *
-    * <p>路径规则只该有一份。统一成 CloudFiles.path 之后，
-    * 本地存进去的东西一定能同步出去。
-    *
-    * <p>只查<b>本轮改动的文件</b>，不查项目里原有的 ——
-    * 老项目要是本来就有几个怪路径，不该让 AI 从此再也改不动它。
-    */
-   for(Iterator<String> ci=changes.keys();ci.hasNext();){
-    String cn=ci.next();
-    if(!CloudFiles.path(cn))throw new Exception("路径不合法（不能以 / 开头，不能含 .. 或空段，每段要有内容）："+cn);
-   }
-   if(p.optBoolean("cloudSource")){JSONObject temp=new JSONObject(p.toString()).put("files",next);CloudFiles.entries(temp);}else validate(next,base);
+  /* 合并与校验统一走 mergeChecked，和暂存路径同一套规则，不会各写一份。 */
+  JSONObject next=mergeChecked(p,base,changes);
   JSONObject out=new JSONObject(p.toString());if(same(next,base))return out;
   /*
     * 存档只存**这次改动的文件的旧内容**，不存整个项目。
