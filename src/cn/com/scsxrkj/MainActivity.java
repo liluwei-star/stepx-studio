@@ -559,6 +559,25 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     * 删掉不丢用户资产，只丢历史痕迹。
     */
    boolean cleaned=false;
+   /*
+    * 剔除 profiles / artProfiles 里残留的 hasKey。
+    *
+    * <p>这个字段本来只是 publicState 给前端看的标记（密钥存不存在），
+    * 但老版本直接改的是 state 里的原对象，于是被 saveState 存进了磁盘。
+    *
+    * <p>留着它有实际危害：用户后来删了密钥，state 里残留的 true 还在，
+    * 前端就继续显示「已配置密钥」—— 用户点进去才发现密钥早没了。
+    *
+    * <p>所以加载时清掉，让这个标记只存在于给前端的那份副本里。
+    */
+   for(String pk:new String[]{"profiles","artProfiles"}){
+    JSONArray arr=state.optJSONArray(pk);
+    if(arr==null)continue;
+    for(int i=0;i<arr.length();i++){
+     JSONObject o=arr.optJSONObject(i);
+     if(o!=null&&o.remove("hasKey")!=null)cleaned=true;
+    }
+   }
    JSONArray prs0=state.optJSONArray("projects");
    if(prs0!=null)for(int i=0;i<prs0.length();i++){
     JSONObject pr=prs0.optJSONObject(i);
@@ -586,11 +605,30 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     JSONArray snaps=pr.optJSONArray("snapshots");
     if(snaps!=null&&snaps.length()>0){
      JSONObject cur=pr.optJSONObject("files");
-     JSONArray keep=new JSONArray();
-     for(int si=Math.max(0,snaps.length()-2);si<snaps.length();si++){
+     /*
+      * 保留哪些存档：用户手动存的<b>一份都不丢</b>，
+      * 自动存档只留最近两份（老存档没有 source 字段，同样当用户的）。
+      *
+      * <p>原来是无脑只留最后两份 —— 用户手动存的基准会被自动存档顶掉，
+      * 「变更」视图的基准悄悄换了，用户完全看不出来。
+      */
+     java.util.ArrayList<Object> keepList=new java.util.ArrayList<>();
+     JSONArray autoList=new JSONArray();
+     for(int si=0;si<snaps.length();si++){
       JSONObject s=snaps.optJSONObject(si);
       if(s==null)continue;
-      if(s.optBoolean("delta",false)){keep.put(s);continue;}
+      if(CloudFiles.isUserSnapshot(s))keepList.add(s);
+      else autoList.put(s);
+     }
+     for(int ai=Math.max(0,autoList.length()-2);ai<autoList.length();ai++)keepList.add(autoList.get(ai));
+     JSONArray keep=new JSONArray();
+     for(Object o:keepList)keep.put(o);
+     for(int si=0;si<snaps.length();si++){
+      JSONObject s=snaps.optJSONObject(si);
+      if(s==null)continue;
+      if(!CloudFiles.isUserSnapshot(s))continue;
+      // 差量形态的已经在 keepList 里了，不要再放一遍
+      if(s.optBoolean("delta",false))continue;
       /* 全量 → 差量：只留与当前不同的文件的旧内容 */
       JSONObject sf=s.optJSONObject("files");
       JSONObject delta=new JSONObject();
@@ -611,7 +649,9 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
        String n=it.next();
        if(sf==null||!sf.has(n))added.put(n);
       }
-      JSONObject nc=new JSONObject().put("time",s.optLong("time")).put("files",delta).put("added",added).put("delta",true);
+      // 转换后要带上原来的 source，否则会被当成「没有 source 的老存档」
+      JSONObject nc=new JSONObject().put("time",s.optLong("time")).put("files",delta).put("added",added).put("delta",true)
+       .put("source",s.optString("source","user"));
       keep.put(nc);
       cleaned=true;
      }
@@ -733,12 +773,53 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     * <p>所以这里改成：顶层键逐个放，需要瘦身的地方单独处理。
     */
    JSONObject c=new JSONObject();
+   /*
+    * 顶层键逐个搬过来。
+    *
+    * <p><b>为什么不能直接 {@code c.put(k,state.opt(k))}：</b>那样放进 c 的是
+    * state 里那个对象的<b>引用</b>，不是副本。
+    * 后面给 profiles / artProfiles 补 {@code hasKey} 时，
+    * 改的就是 state 里的原对象 —— 每调一次 publicState 就往 state 里写一次，
+    * 而且这些改动会被 saveState 持久化到磁盘。
+    *
+    * <p>后果不只是脏数据：{@code hasKey} 表示「密钥存在」。
+    * 用户后来删了密钥，state 里残留的 {@code true} 还在，
+    * 前端继续显示「已配置」—— 用户点进去才发现密钥没了。
+    *
+    * <p>所以顶层数组一律<b>造新副本</b>再放进来。
+    * 需要瘦身的（projects / chats）本来就在下面单独造过了，
+    * 这里跳过它们，避免重复拷贝。
+    */
    for(java.util.Iterator<String> it=state.keys();it.hasNext();){
     String k=it.next();
-    // 顶层数组（projects / chats / usage 等）逐个处理，需要瘦身的在下面单独处理
-    c.put(k,state.opt(k));
+    /* projects / chats 下面会单独造瘦身后的副本，这里不要引用旧的。 */
+    if("projects".equals(k)||"chats".equals(k))continue;
+    Object v=state.opt(k);
+    if(v instanceof JSONArray){
+     /* 数组：逐项浅拷贝，元素本身若是对象也要单独拷。 */
+     JSONArray srcArr=(JSONArray)v;
+     JSONArray copy=new JSONArray();
+     for(int i=0;i<srcArr.length();i++){
+      Object item=srcArr.opt(i);
+      if(item instanceof JSONObject)copy.put(new JSONObject(((JSONObject)item).toString()));
+      else copy.put(item);
+     }
+     c.put(k,copy);
+    }else if(v instanceof JSONObject){
+     c.put(k,new JSONObject(((JSONObject)v).toString()));
+    }else c.put(k,v);
    }
-   c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);JSONArray ap=c.getJSONArray("artProfiles");for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.getJSONArray("profiles");for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));
+   c.put("aiAssistantEnabled",aiEnabled());if(localModels!=null){c.put("localModels",localModels.list());c.put("localModelStatus",localModels.status);}c.put("activeAi",liveEdit);c.put("artBusy",art!=null&&art.busy);/*
+   * artProfiles / profiles 用 opt 而不是 get。
+   *
+   * <p>getJSONArray 在字段不存在时直接抛 JSONException。而 artProfiles
+   * 是绘图服务的账号列表 —— 用户没配过绘图账号、或者老版本升级上来
+   * 还没迁移过，这字段就是空的/没有。这时候整个 publicState() 崩掉，
+   * 前端拿不到任何状态，界面直接空白。
+   *
+   * <p>这是「没配某个可选功能」不该导致整个应用起不来。
+   */
+   JSONArray ap=c.optJSONArray("artProfiles");if(ap==null)ap=new JSONArray();for(int ai=0;ai<ap.length();ai++)ap.getJSONObject(ai).put("hasKey",vault.has("art:"+ap.getJSONObject(ai).getString("id")));if(connectors!=null)c.put("connectors",connectors.data);JSONArray ps=c.optJSONArray("profiles");if(ps==null)ps=new JSONArray();for(int i=0;i<ps.length();i++)ps.getJSONObject(i).put("hasKey",ps.getJSONObject(i).optString("protocol").equals("local")||vault.has(ps.getJSONObject(i).getString("id")));
   // 给每个项目补上二进制文件的大小，供文件浏览器显示。
   // 文本文件的大小前端自己算得了（字符串长度），二进制不行 ——
   // base64 的原文长度看不出来，大文件的 .bin 引用更是只有个名字。
@@ -895,7 +976,27 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    JSONObject c=calls.optJSONObject(i);
    if(c==null)continue;
    JSONObject brief=new JSONObject().put("name",c.optString("name")).put("ok",!c.has("error"));
-   String body=c.optString("result","");
+   /*
+    * 编译结果要单独拎出来。
+    *
+    * <p>自动验证编译失败时，结果里带的是 {@code {ok:false, error:"..."}}，
+    * 不是 {@code error} 字段。所以按「有没有 error 字段」判断成功与否，
+    * 会把编译失败显示成 ok=true —— 用户看到「验证编译 通过」，
+    * 装到手机上才发现跑不起来。
+    *
+    * <p>所以这里看编译结果自己的 ok 字段，失败时把报错原文带出去。
+    */
+   Object raw=c.opt("result");
+   JSONObject res=raw instanceof JSONObject?(JSONObject)raw:null;
+   if(res!=null&&res.has("ok")){
+    brief.put("ok",res.optBoolean("ok",false));
+    if(!res.optBoolean("ok",false)){
+     String ce=res.optString("error","");
+     if(!ce.isEmpty())brief.put("error",ce.length()>400?ce.substring(0,400)+"…":ce);
+     else brief.put("error","编译检查没通过");
+    }
+   }
+   String body=raw==null?"":String.valueOf(raw);
    if(!body.isEmpty())brief.put("resultBytes",body.length());
    String err=c.optString("error","");
    if(!err.isEmpty())brief.put("error",err.length()>300?err.substring(0,300):err);
@@ -1781,7 +1882,19 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
  void restoreProjectFiles(JSONObject q)throws Exception{
   if(cloud.busy())throw new Exception("请先结束同步");
   JSONObject current=byId("projects",q.getString("id"));if(current.optBoolean("cloudSource")){
-   if(projectChangeBusy())throw new Exception("请先结束当前任务");if(!ProjectEdits.same(current.getJSONObject("files"),q.getJSONObject("base")))throw new Exception("文件已变化，请重新打开快照");JSONArray snaps=current.optJSONArray("snapshots");if(snaps==null||snaps.length()==0)throw new Exception("没有快照");JSONObject last=snaps.getJSONObject(snaps.length()-1),changed=new JSONObject(current.toString());CloudFiles.snapshot(changed);changed.put("files",new JSONObject(last.getJSONObject("files").toString()));if(last.has("binaryFiles"))changed.put("binaryFiles",new JSONObject(last.getJSONObject("binaryFiles").toString()));CloudFiles.entries(changed);JSONObject before=new JSONObject(state.toString());try{replaceProject(changed);saveState();}catch(Exception e){state=before;throw e;}sendState();event("filesApplied",q.getString("id"));return;
+   if(projectChangeBusy())throw new Exception("请先结束当前任务");if(!ProjectEdits.same(current.getJSONObject("files"),q.getJSONObject("base")))throw new Exception("文件已变化，请重新打开快照");JSONArray snaps=current.optJSONArray("snapshots");if(snaps==null||snaps.length()==0)throw new Exception("没有快照");JSONObject last=snaps.getJSONObject(snaps.length()-1),changed=new JSONObject(current.toString());CloudFiles.snapshot(changed);changed.put("files",new JSONObject(last.getJSONObject("files").toString()));if(last.has("binaryFiles"))changed.put("binaryFiles",new JSONObject(last.getJSONObject("binaryFiles").toString()));CloudFiles.entries(changed);
+   /*
+    * 只备份「要改的那一个项目」，不备份整个 state。
+    *
+    * <p>原来这里是 {@code new JSONObject(state.toString())} ——
+    * 整个 state 包含所有项目的文件全文，深拷贝一次就是几十上百 MB，
+    * 手机上直接 OOM。这跟 saveState 里定的规矩是同一件事，
+    * 当时改了 saveState，漏了这一处。
+    *
+    * <p>回滚也只需要这一个项目：改的就是它，换回去就够。
+    */
+   JSONObject beforeProject=new JSONObject(current.toString());
+   try{replaceProject(changed);saveState();}catch(Exception e){replaceProject(beforeProject);throw e;}sendState();event("filesApplied",q.getString("id"));return;
   }
 
   /*
@@ -2553,7 +2666,8 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
   try{
    String pid=req.getString("projectId");
    JSONObject proj=byId("projects",pid);
-   CloudFiles.snapshot(proj);
+   // 用户手动存的存档标记成 user：后面自动存档再多，也不会把它顶掉
+   CloudFiles.snapshot(proj,null,"user");
    proj.put("updated",System.currentTimeMillis());
    upsert("projects",proj);
    saveState();

@@ -355,10 +355,24 @@ final class CloudFiles {
  * @param p      项目对象（会被就地修改）
  * @param changed 这次变了的文件路径；传 null 表示「全量存一份」
  */
-static void snapshot(JSONObject p)throws Exception{snapshot(p,null);}
-static void snapshot(JSONObject p,java.util.Set<String> changed)throws Exception{
- JSONArray old=p.optJSONArray("snapshots"),out=new JSONArray();
- if(old!=null)for(int i=Math.max(0,old.length()-1);i<old.length();i++)out.put(old.get(i));
+static void snapshot(JSONObject p)throws Exception{snapshot(p,null,"auto");}
+static void snapshot(JSONObject p,java.util.Set<String> changed)throws Exception{snapshot(p,changed,"auto");}
+/**
+ * 存一份存档。
+ *
+ * <p>{@code source} 记着这份存档是谁存的：
+ * {@code user} 是用户手动点的，{@code auto} 是系统自动存的
+ * （云端同步、AI 改代码、清洗、补文件）。
+ *
+ * <p><b>为什么要分这个：</b>自动存档每做一次 AI 改动就多一份，
+ * 而状态文件放不下无限多份 —— 必须裁掉一些。
+ * 可要是无脑裁，用户手动存的那份会被后来的自动存档顶掉，
+ * 用户回头想「回到我改之前的样子」，发现没了。
+ *
+ * <p>所以裁剪规则是：自动存档按时间留最近几份，<b>用户手动存的一份都不丢</b>。
+ */
+static void snapshot(JSONObject p,java.util.Set<String> changed,String source)throws Exception{
+ JSONArray old=p.optJSONArray("snapshots");
  JSONObject cur=p.optJSONObject("files"),delta=new JSONObject();
  if(changed==null){
   if(cur!=null)for(java.util.Iterator<String> it=cur.keys();it.hasNext();){String n=it.next();delta.put(n,cur.optString(n,""));}
@@ -372,7 +386,69 @@ static void snapshot(JSONObject p,java.util.Set<String> changed)throws Exception
    else delta.put(n,JSONObject.NULL);
   }
  }
- out.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("delta",true));
- p.put("snapshots",out);
+ // 这一份新存档：跟老的合并后统一裁剪
+ JSONArray newest=new JSONArray();
+ newest.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("delta",true).put("source",source==null?"auto":source));
+ p.put("snapshots",trimSnapshots(old,newest));
 }
+ /**
+  * 裁剪存档列表。
+  *
+  * <p>规则：最近 {@link #SNAP_KEEP} 份自动存档照留，
+  * <b>用户手动存的（source=user）一份都不丢</b>。
+  *
+  * <p>原来是无脑只留最后一份 —— AI 改一轮代码，用户手动存的基准就没了，
+  * 「变更」视图自动跳到最新的自动存档上，用户完全看不出发生了什么。
+  */
+ static final int SNAP_KEEP=5;
+ /**
+  * 这份存档是不是用户手动存的。
+  *
+  * <p>没有 source 字段的老存档一律当成用户存的 ——
+  * 老版本只有用户手动点过才产生存档，自动存档是后来才有的。
+  * 把老的当自动存档裁掉，就等于把用户的历史基准删了。
+  */
+ static boolean isUserSnapshot(JSONObject s){
+  if(s==null)return false;
+  String src=s.optString("source","");
+  // 没有 source → 老存档 → 当作用户存的
+  if(src.isEmpty())return true;
+  return "user".equals(src);
+ }
+ static JSONArray trimSnapshots(JSONArray old,JSONArray newest){
+  JSONArray all=new JSONArray();
+  if(old!=null)for(int i=0;i<old.length();i++)all.put(old.opt(i));
+  if(newest!=null)for(int i=0;i<newest.length();i++)all.put(newest.opt(i));
+  /*
+   * 先数自动存档一共几份，再决定丢哪些。
+   *
+   * <p><b>丢的是最老的那几份，留的是最近的。</b>
+   * 「变更」视图默认拿最后一份存档当基准，所以最近的必须留着 ——
+   * 留最早的那几份等于把用户当下要看的基准删了。
+   */
+  /*
+   * 老项目的存档没有 source 字段 —— 那都是用户自己点出来的，
+   * 必须当成 user 保留下来，不能当自动存档裁掉。
+   */
+  int autoTotal=0;
+  for(int i=0;i<all.length();i++){
+   JSONObject s=all.optJSONObject(i);
+   if(s==null)continue;
+   if(!isUserSnapshot(s))autoTotal++;
+  }
+  // 自动存档要丢掉的份数（从最老的那头丢）
+  int autoDrop=Math.max(0,autoTotal-SNAP_KEEP);
+  JSONArray out=new JSONArray();
+  int autoSeen=0;
+  for(int i=0;i<all.length();i++){
+   JSONObject s=all.optJSONObject(i);
+   if(s==null)continue;
+   if(isUserSnapshot(s)){out.put(s);continue;}
+   autoSeen++;
+   // 前 autoDrop 份自动存档丢掉，剩下的（包括最新那份）留下
+   if(autoSeen<=autoDrop)continue;
+   out.put(s);
+  }
+  return out;
+ }
 }

@@ -125,7 +125,18 @@ final class ProjectEdits {
     *
     * <p>同时只留 2 份 —— 再多用户也用不上，而每份都是内存负担。
     */
-   JSONArray snaps=out.optJSONArray("snapshots");if(snaps==null)snaps=new JSONArray();JSONArray kept=new JSONArray();for(int i=Math.max(0,snaps.length()-1);i<snaps.length();i++)kept.put(snaps.get(i));
+   /*
+   * 存档。
+   *
+   * <p>这里原来只留最后一份 —— AI 每改一轮代码，
+   * 用户之前手动存的那份基准就被顶掉了。用户回头想看
+   * 「我改之前是什么样」，发现「变更」视图的基准已经变了，
+   * 而且没有任何提示。
+   *
+   * <p>现在跟 CloudFiles 用同一套裁剪：自动存档留最近几份，
+   * <b>用户手动存的一份都不丢</b>。
+   */
+   JSONArray snaps=out.optJSONArray("snapshots");if(snaps==null)snaps=new JSONArray();
    JSONObject delta=new JSONObject();
    JSONArray added=new JSONArray();
    for(Iterator<String> dit=changes.keys();dit.hasNext();){
@@ -134,8 +145,9 @@ final class ProjectEdits {
     // 当时没有这个文件（这次是新建的）→ 用 NULL 标记，恢复时要删掉
     else delta.put(n,JSONObject.NULL);
    }
-   kept.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("added",added).put("delta",true));
-   out.put("snapshots",kept).put("files",next).put("updated",System.currentTimeMillis());
+   JSONArray mine=new JSONArray();
+   mine.put(new JSONObject().put("time",System.currentTimeMillis()).put("files",delta).put("added",added).put("delta",true).put("source","auto"));
+   out.put("snapshots",CloudFiles.trimSnapshots(snaps,mine)).put("files",next).put("updated",System.currentTimeMillis());
   JSONArray h=out.optJSONArray("history");if(h==null)h=new JSONArray();h.put(new JSONObject().put("time",System.currentTimeMillis()).put("type","apply").put("text",source+" · "+changes.length()+" 个文件；运行验收待完成。"));out.put("history",h);return out;
  }
  /**

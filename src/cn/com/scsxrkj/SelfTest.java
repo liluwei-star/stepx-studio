@@ -261,6 +261,62 @@ final class SelfTest {
   catch(Exception e){pathSkillRejected=true;}
   check(pathSkillRejected,
    "a skill name with a path traversal is still refused");
+  /*
+   * 用户手动存的存档不能被 AI 的自动存档顶掉。
+   *
+   * <p>原来每次 AI 改文件都追加一份存档并只留最后一份 ——
+   * 用户点「存档」存下来的基准就消失了，「变更」视图的基准
+   * 悄悄换掉，用户完全看不出来。
+   */
+  JSONObject snapProj=new JSONObject().put("id","qa-snapkeep").put("name","Snap keep")
+   .put("files",new JSONObject().put("index.html","<html></html>"));
+  a.upsert("projects",snapProj);
+  CloudFiles.snapshot(snapProj,null,"user");
+  JSONObject afterUser=a.byId("projects","qa-snapkeep");
+  int userCount=0;
+  JSONArray sn0=afterUser.optJSONArray("snapshots");
+  if(sn0!=null)for(int i=0;i<sn0.length();i++)
+   if(CloudFiles.isUserSnapshot(sn0.optJSONObject(i)))userCount++;
+  check(userCount==1,
+   "a manual snapshot is recorded");
+  /*
+   * 再模拟三轮 AI 改动 —— 每一轮都会自动追加一份存档。
+   */
+  JSONObject cur=afterUser;
+  for(int round=0;round<3;round++){
+   JSONObject baseF=new JSONObject(cur.getJSONObject("files").toString());
+   JSONObject changed=new JSONObject().put("index.html","<html>round"+round+"</html>");
+   cur=ProjectEdits.apply(cur,baseF,changed,"AI 助手");
+  }
+  a.upsert("projects",cur);
+  JSONObject afterAi=a.byId("projects","qa-snapkeep");
+  int userAfter=0,autoAfter=0;
+  JSONArray sn1=afterAi.optJSONArray("snapshots");
+  if(sn1!=null)for(int i=0;i<sn1.length();i++){
+   JSONObject s=sn1.optJSONObject(i);
+   if(s==null)continue;
+   if(CloudFiles.isUserSnapshot(s))userAfter++;else autoAfter++;
+  }
+  check(userAfter==1,
+   "the manual snapshot survives several AI edits");
+  /*
+   * 编译失败不能显示成成功。
+   *
+   * <p>自动验证编译失败时，错误在 result.ok 里，不在 toolCalls 的 error 字段。
+   * 原来按有没有 error 字段判成功，编译没过却显示 ok:true。
+   */
+  JSONArray cc=new JSONArray();
+  cc.put(new JSONObject().put("name","auto_check_project")
+   .put("result",new JSONObject().put("ok",false).put("error","第 3 行：缺少右括号")));
+  JSONArray ccSummary=a.toolCallSummary(cc);
+  JSONObject cc0=ccSummary.optJSONObject(0);
+  check(cc0!=null&&!cc0.optBoolean("ok",true),
+   "a failed compile is not reported as ok");
+  check(cc0!=null&&cc0.optString("error","").contains("右括号"),
+   "the compile error text reaches the tool record");
+  check(autoAfter>=1,
+   "the automatic snapshots are still kept");
+  a.remove("projects","qa-snapkeep");
   check(a.memory.usageFor(muScope).indexOf("记忆用量")<0
     ||!a.memory.usageFor(muScope).contains("本项目"),
    "clearing the test scope removes it from the usage line");
@@ -1251,6 +1307,137 @@ final class SelfTest {
    check(clamped.endsWith("0123456789"),"the clamped result keeps the tail");
    // 没超限的原样返回
    check(DevAgent.clampToolResult("短").equals("短"),"a short tool result is untouched");
+
+  /*
+   * 工具结果是一份 JSON，截断不能把它切坏。
+   *
+   * <p>模型收到的是一段文本，它会当 JSON 读。切在中间就只剩半个数组，
+   * 模型后面几十轮都在跟坏数据打交道 —— 看不到真结果，只会不停重查。
+   */
+  {
+   JSONArray hits=new JSONArray();
+   for(int i=0;i<2000;i++){
+    JSONObject h=new JSONObject().put("path","src/file"+i+".js").put("line",i+1)
+     .put("text","匹配的一行内容xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    hits.put(h);
+   }
+   JSONObject searchResult=new JSONObject().put("matches",hits).put("count",hits.length());
+   String clampedJson=DevAgent.clampToolResult(searchResult.toString());
+   boolean stillJson=true;
+   JSONObject reparsed=null;
+   try{reparsed=new JSONObject(clampedJson);}catch(Exception e){stillJson=false;}
+   check(stillJson,"a clamped JSON tool result is still valid JSON");
+   if(reparsed!=null){
+    check(reparsed.optBoolean("matches_truncated",false),
+     "the clamped JSON says the array was shortened");
+    check(reparsed.optInt("matches_total",0)==2000,
+     "the clamped JSON says how many items there were in total");
+    check(reparsed.optInt("matches_shown",0)>0&&reparsed.optInt("matches_shown",0)<2000,
+     "the clamped JSON shows only part of the array");
+    check(reparsed.optJSONArray("matches")!=null
+     &&reparsed.optJSONArray("matches").length()==reparsed.optInt("matches_shown",-1),
+     "the kept array really has the number of items it claims");
+   }
+   // 非 JSON 的纯文本还是按老办法截
+   check(DevAgent.clampToolResult("短").equals("短"),"a short tool result is untouched");
+  }
+
+  /*
+   * publicState 不能往 state 里写东西。
+   *
+   * <p>它要给 profiles / artProfiles 补 hasKey（密钥存不存在）。
+   * 如果直接改 state 里的原对象，这些标记会被 saveState 持久化：
+   * 用户后来删了密钥，state 里残留的 true 还在，
+   * 前端继续显示「已配置」—— 用户点进去才发现没了。
+   */
+  {
+   /*
+    * 真机自测跑在真实 Activity 上 —— 不能破坏用户数据。
+    * 所以先把原 state 存一份，测完原样放回去。
+    */
+   JSONObject savedState=a.state;
+   try{
+    JSONObject st=new JSONObject();
+    JSONArray profs=new JSONArray();
+    profs.put(new JSONObject().put("id","p1").put("name","测试模型"));
+    st.put("profiles",profs);
+    a.state=st;
+    a.publicState();
+    boolean leaked=false;
+    JSONArray after=a.state.optJSONArray("profiles");
+    if(after!=null)for(int i=0;i<after.length();i++){
+     if(after.getJSONObject(i).has("hasKey"))leaked=true;
+    }
+    check(!leaked,"publicState does not write hasKey into the stored profiles");
+   }finally{
+    a.state=savedState;
+   }
+  }
+
+  /*
+   * 被截断的参数补全后，写文件类工具不能执行。
+   *
+   * <p>补全只是把括号引号闭上，正文没回来。
+   * 直接执行 = 把只有一半的文件写进项目，工具还报成功。
+   */
+  {
+   JSONObject repairedWrite=new JSONObject().put("name","write_files")
+    .put("args",new JSONObject().put("files",new JSONObject().put("a.js","半截")))
+    .put("argsRepaired",true).put("argsError","{\"files\":{\"a.js\":\"半截");
+   check(!DevAgent.canExecute("write_files",repairedWrite),
+    "a write tool with repaired (truncated) arguments is refused");
+   check(!DevAgent.canExecute("patch_file",repairedWrite),
+    "patch_file with repaired arguments is refused too");
+   check(!DevAgent.canExecute("multi_patch",repairedWrite),
+    "multi_patch with repaired arguments is refused too");
+   /* 只读工具不受影响 —— 读一半不致命。 */
+   check(DevAgent.canExecute("read_file",repairedWrite),
+    "a read tool with repaired arguments is still allowed");
+   check(DevAgent.canExecute("search_code",repairedWrite),
+    "search_code with repaired arguments is still allowed");
+   /* 参数没被截断的写工具正常执行。 */
+   check(DevAgent.canExecute("write_files",new JSONObject().put("name","write_files")),
+    "a normal write tool call is allowed");
+  }
+
+  /*
+   * 自动验证编译的结果不能伪装成工具消息。
+   *
+   * <p>原生协议里每个 tool 消息都要配 tool_call_id。自动编译是我们自己跑的，
+   * 没有 id。硬塞一条进去，服务端会直接 400 —— 现象是「改完文件下一轮就崩」。
+   */
+  {
+   JSONArray msgs=new JSONArray();
+   msgs.put(new JSONObject().put("role","assistant")
+    .put("tool_calls",new JSONArray().put(new JSONObject().put("id","call_1").put("type","function")
+     .put("function",new JSONObject().put("name","patch_file").put("arguments","{}")))));
+   msgs.put(new JSONObject().put("role","tool").put("tool_call_id","call_1").put("content","ok"));
+   int before=msgs.length();
+   DevAgent.appendAutoCheck(msgs,"编译失败：第 3 行缺少分号","compatible");
+   check(msgs.length()==before+1,"the auto compile result adds one message");
+   JSONObject added=msgs.getJSONObject(msgs.length()-1);
+   check("user".equals(added.optString("role","")),
+    "the auto compile result is a plain user message, not a tool message");
+   check(!added.has("tool_call_id"),
+    "the auto compile result carries no dangling tool_call_id");
+   check(added.optString("content","").contains("缺少分号"),
+    "the auto compile result carries the compiler output");
+
+   /* Anthropic：追加到最后一条 user 消息的 content 数组里。 */
+   JSONArray am=new JSONArray();
+   am.put(new JSONObject().put("role","user").put("content",new JSONArray()
+    .put(new JSONObject().put("type","tool_result").put("tool_use_id","call_1").put("content","ok"))));
+   DevAgent.appendAutoCheck(am,"编译通过","anthropic");
+   check(am.length()==1,"the anthropic auto compile result does not add a separate message");
+   JSONArray ac=am.getJSONObject(0).optJSONArray("content");
+   check(ac!=null&&ac.length()==2,"the anthropic auto compile result is appended as a text block");
+   if(ac!=null&&ac.length()==2){
+    check("text".equals(ac.getJSONObject(1).optString("type","")),
+     "the appended block is a text block");
+    check(ac.getJSONObject(1).optString("text","").contains("编译通过"),
+     "the appended block carries the compiler output");
+   }
+  }
    // 走协议时也要被截
    JSONArray hugeResult=new JSONArray().put(new JSONObject().put("name","read_file").put("id","call_big")
     .put("result",fat));

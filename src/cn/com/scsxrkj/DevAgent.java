@@ -29,6 +29,32 @@ final class DevAgent {
   * @param name 工具名
   * @return 是否会改动项目文件
   */
+ /**
+  * 判断一个工具调用能不能直接执行。
+  *
+  * <p><b>为什么需要单独一个方法：</b>参数被 max_tokens 截断后，
+  * 系统会把缺的括号引号补上，让 JSON 能解析。但补回来的只是
+  * <b>收尾</b>，<b>正文内容没回来</b>。
+  *
+  * <p>对只读工具无所谓：读一半的文件，模型看到的是「读到了这些」，
+  * 最多内容少一点，但结构是完整的。
+  *
+  * <p>对写文件类工具就是灾难：把只有前半截的内容当成完整文件写进去，
+  * 工具还报「写入成功」。模型被骗，用户拿到一个缺了一半的文件，
+  * 而且编译往往还能过（前半截也是合法代码）—— 很难被发现。
+  *
+  * <p>所以写文件类工具遇到截断参数，一律拒绝执行，让模型重发。
+  *
+  * @param name  工具名
+  * @param call  模型发来的工具调用（可能带 argsRepaired 标记）
+  * @return true 表示可以执行
+  */
+ static boolean canExecute(String name,JSONObject call){
+  if(call==null)return false;
+  if(call.optBoolean("argsRepaired",false)&&isEditTool(name))return false;
+  return true;
+ }
+
  static boolean isEditTool(String name){
   return name.equals("write_files")||name.equals("replace_text")
    ||name.equals("patch_file")||name.equals("multi_patch")
@@ -262,6 +288,24 @@ final class DevAgent {
   if(body==null)return "";
   if(limit<512)limit=512;
   if(body.length()<=limit)return body;
+  /*
+   * 工具返回的是一份 JSON，直接切一刀会把结构切坏。
+   *
+   * <p><b>为什么必须 JSON 感知：</b>模型收到的 body 是一段文本，
+   * 它会尝试当 JSON 解析来读。切在中间就会得到半个数组 ——
+   * 后面几十轮模型都在跟坏数据打交道，看不到真正的结果，
+   * 只会不停重查，或者做出错误判断。
+   *
+   * <p>所以分两种情况处理：
+   * <ul>
+   *  <li>能解析成 JSON：改成结构化的「部分结果」，
+   *      保留能说明问题的字段，数组类只留前若干项并标明还有多少。</li>
+   *  <li>不是 JSON（本来就是自然语言，或已经坏了）：按原样切头尾，
+   *      并明说省略了多少。</li>
+   * </ul>
+   */
+  String trimmed=clampAsJson(body,limit);
+  if(trimmed!=null)return trimmed;
   int head=limit*2/3;
   int tail=limit/3;
   int omitted=body.length()-head-tail;
@@ -270,6 +314,157 @@ final class DevAgent {
    +"如果需要被省略的部分，请用 read_file 分段读取（startLine/lineCount），"
    +"或用 search_code 定位具体位置。…\n\n"
    +body.substring(body.length()-tail);
+ }
+
+ /**
+  * 把一份过长的 JSON 结果裁成仍然是合法 JSON 的「部分结果」。
+  *
+  * <p><b>返回 null 表示这份东西不是 JSON</b>，让调用方走纯文本那条路。
+  *
+  * <p>裁剪原则：数组类字段（搜索命中、文件列表）只留前若干条，
+  * 并且明确写出还有多少条没给 —— 模型据此决定要不要继续查；
+  * 字符串类字段（文件内容、报错堆栈）留头尾，中间明说省略了多少。
+  */
+ static String clampAsJson(String body,int limit){
+  JSONObject o=null;
+  /*
+   * 只处理对象形态。
+   *
+   * <p>顶层是数组时不做处理：硬包成 {"items":[...]} 会改变结构，
+   * 模型按原样去读字段就找不到了。宁可走纯文本截断那条路
+   * （至少头尾是真实的），也不要给一个它认不出的形状。
+   */
+  try{o=new JSONObject(body);}catch(Exception e){return null;}
+  try{
+   JSONObject small=new JSONObject();
+   boolean changed=false;
+   java.util.Iterator<String> it=o.keys();
+   while(it.hasNext()){
+    String k=it.next();
+    Object v=o.opt(k);
+    if(v instanceof JSONArray){
+     JSONArray arr=(JSONArray)v;
+     if(arr.length()>0&&arr.toString().length()>limit/2){
+      /* 数组太长：只留前面几条，明说还剩多少。 */
+      JSONArray head=new JSONArray();
+      int keep=Math.max(1,arr.length()/4);
+      for(int i=0;i<keep&&i<arr.length();i++)head.put(arr.opt(i));
+      small.put(k,head);
+      small.put(k+"_truncated",true);
+      small.put(k+"_total",arr.length());
+      small.put(k+"_shown",keep);
+      small.put(k+"_note","这一项共 "+arr.length()+" 条，这里只列了前 "+keep
+       +" 条。如果需要全部，请缩小搜索范围、提高 limit，或用 read_file 分段读取。");
+      changed=true;
+     }else small.put(k,v);
+    }else if(v instanceof JSONObject){
+     JSONObject sub=clampJsonObject((JSONObject)v,limit/2);
+     small.put(k,sub);
+     if(sub.optBoolean("__truncated",false))changed=true;
+    }else{
+     String s=v==null?"":String.valueOf(v);
+     if(s.length()>limit/2){
+      int keepHead=limit/4;
+      small.put(k,s.substring(0,keepHead)
+       +"…【此处省略 "+(s.length()-keepHead)+" 字符】"
+       +s.substring(s.length()-limit/4));
+      small.put(k+"_truncated",true);
+      changed=true;
+     }else small.put(k,v);
+    }
+   }
+   /*
+    * 每个字段都不长但整体超限（例如字段特别多）时，
+    * 上面不会改任何东西 —— 但整体还是超的，
+    * 所以不能就这么放行，必须走下面的「只留概要」那条路。
+    * 直接返回 null 会退回纯文本截断，JSON 结构照样被切坏。
+    */
+   /*
+    * 裁完还是太长，就按比例缩小数组，<b>并且同步更新计数</b>。
+    *
+    * <p><b>为什么必须同步：</b>之前这里有个「只留概要」的兜底分支，
+    * 它会把数组整个换成空、只留几个小字段，但 {@code matches_shown}
+    * 还是按先前算的份数写着 —— 模型读到「展示了 500 条」，
+    * 实际数组里只有 12 条。它要么以为自己看全了（其实没有），
+    * 要么以为数据坏了。这比多花几百字符严重得多。
+    *
+    * <p>所以这里老老实实地按比例缩数组，缩到能放下为止，
+    * 每缩一次就把计数改成真实值。宁可少给内容，不给假数字。
+    */
+   int round=0;
+   while(small.toString().length()>limit&&round<12){
+    round++;
+    /* 找出当前最长的那个数组字段，把它砍掉一半。 */
+    String longestKey=null;
+    JSONArray longestArr=null;
+    java.util.Iterator<String> it2=small.keys();
+    while(it2.hasNext()){
+     String k=it2.next();
+     Object v=small.opt(k);
+     if(v instanceof JSONArray){
+      JSONArray arr=(JSONArray)v;
+      if(longestArr==null||arr.length()>longestArr.length()){
+       longestKey=k;longestArr=arr;
+      }
+     }
+    }
+    if(longestKey==null||longestArr==null||longestArr.length()<=1)break;
+    int newLen=Math.max(1,longestArr.length()/2);
+    JSONArray smaller=new JSONArray();
+    for(int i=0;i<newLen;i++)smaller.put(longestArr.opt(i));
+    small.put(longestKey,smaller);
+    /* 计数必须跟着变，否则模型拿到的数字是假的。 */
+    int total=small.optInt(longestKey+"_total",-1);
+    if(total>=0)small.put(longestKey+"_total",total);
+    small.put(longestKey+"_shown",newLen);
+    small.put(longestKey+"_truncated",true);
+    small.put(longestKey+"_note","这一项共 "+total+" 条，这里只列了前 "+newLen
+     +" 条。如果需要全部，请缩小搜索范围、提高 limit，或用 read_file 分段读取。");
+   }
+   String out=small.toString();
+   if(out.length()>limit){
+    /* 实在缩不动了：只留概要，但把计数一起带走，别留假数字。 */
+    JSONObject tiny=new JSONObject();
+    tiny.put("truncated",true);
+    tiny.put("note","内容太长，这里只保留了概要。完整内容请用 read_file 分段读取，"
+     +"或用 search_code 缩小范围后重新查询。");
+    int budget=limit-200;
+    java.util.Iterator<String> it3=small.keys();
+    while(it3.hasNext()&&budget>0){
+     String k=it3.next();
+     if(k.endsWith("_note")||k.equals("note"))continue;
+     Object raw=small.opt(k);
+     /* 数组和长文本都不带进概要，只带数字型计数。 */
+     if(raw instanceof JSONArray||raw instanceof JSONObject)continue;
+     String v=String.valueOf(raw);
+     if(v.length()>budget/3)continue;
+     tiny.put(k,v);
+     budget-=v.length()+k.length()+4;
+    }
+    out=tiny.toString();
+   }
+   return out;
+  }catch(Exception e){return null;}
+ }
+
+ /** 递归裁剪子对象里的长字符串。 */
+ static JSONObject clampJsonObject(JSONObject o,int limit){
+  JSONObject out=new JSONObject();
+  try{
+   java.util.Iterator<String> it=o.keys();
+   while(it.hasNext()){
+    String k=it.next();
+    Object v=o.opt(k);
+    if(v instanceof String&&((String)v).length()>limit){
+     String s=(String)v;
+     int keep=limit/3;
+     out.put(k,s.substring(0,keep)+"…【此处省略 "+(s.length()-keep)+" 字符】"
+      +s.substring(s.length()-limit/4));
+     out.put("__truncated",true);
+    }else out.put(k,v);
+   }
+  }catch(Exception e){}
+  return out;
  }
 
  /**
@@ -482,6 +677,46 @@ final class DevAgent {
   JSONArray out=new JSONArray();
   for(int li=0;li<list.size();li++)out.put(list.get(li));
   return out;
+ }
+
+ /**
+  * 把「自动验证编译」的结果按协议正确地塞回对话。
+  *
+  * <p><b>为什么不能走 tool 消息：</b>原生协议要求每个 tool 消息都配一个
+  * tool_call_id。自动编译是我们自己发起的，没有对应的 tool_call，
+  * 硬塞一条无主 tool 消息进去，服务端会直接拒绝请求（400）——
+  * 而且这个错完全看不出跟「编译结果」有关系。
+  *
+  * <p>所以按协议分两种处理：
+  * <ul>
+  *  <li>OpenAI：追加一条普通的 role:"user" 消息。</li>
+  *  <li>Anthropic：把内容追加到<b>最后一条</b> user 消息的 content 数组里，
+  *      作为额外的 text 块。</li>
+  * </ul>
+  *
+  * @param messages 当前对话（会被就地修改）
+  * @param text     编译结果说明
+  * @param protocol "openai" 或 "anthropic"
+  */
+ static void appendAutoCheck(JSONArray messages,String text,String protocol)throws Exception{
+  if(messages==null||text==null||text.isEmpty())return;
+  String body="【自动验证编译】以下是刚刚改动后的真实编译结果：\n"+text
+   +"\n如果编译没过，请按报错自己改，不要等着用户来告诉你。";
+  if("anthropic".equals(protocol)){
+   /* 找最后一条 user 消息，往它的 content 数组里加一个 text 块。 */
+   for(int i=messages.length()-1;i>=0;i--){
+    JSONObject m=messages.optJSONObject(i);
+    if(m==null||!"user".equals(m.optString("role","")))continue;
+    Object raw=m.opt("content");
+    if(raw instanceof JSONArray){
+     JSONArray arr=(JSONArray)raw;
+     arr.put(new JSONObject().put("type","text").put("text",body));
+     return;
+    }
+    break;
+   }
+  }
+  messages.put(new JSONObject().put("role","user").put("content",body));
  }
 
  static JSONArray toolResultMessages(JSONArray results,String protocol)throws Exception{
@@ -829,11 +1064,25 @@ final class DevAgent {
       *
       * <p>所以这里往对话里插一条明确的更正：现在要走 JSON 协议了。
       */
-     system+="\n\n【协议更正】本轮服务端不支持原生工具调用。"
+     /*
+      * 改的是 systemTemplate，不是 system。
+      *
+      * <p><b>这里原来是个哑弹。</b>systemTemplate 在进循环之前就拼好了，
+      * 每轮真正发出去的是 systemNow = systemTemplate.replace(占位符, 概览)。
+      * 所以往 system 上追加的「协议更正」从来没有进过任何一次请求 ——
+      * 降级后模型收到的仍然是原生协议的说明（要它直接调工具、别写 JSON），
+      * 而服务端只认 JSON。模型于是照着原生规矩来：正文里不写工具请求，
+      * 一条工具都没跑起来，整轮白跑。
+      *
+      * <p>而且降级重试那一次发的是 systemNow，也是旧模板的产物。
+      * 所以必须同时改模板、重算 systemNow。
+      */
+     systemTemplate=systemTemplate+"\n\n【协议更正】本轮服务端不支持原生工具调用。"
       +"请把工具请求写进正文，格式：{\"tools\":[{\"name\":\"工具名\",\"args\":{...}}]}。"
       +"文件改动写成 {\"summary\":\"说明\",\"files\":{\"文件路径\":\"完整内容\"}}。";
+     String degradedSystem=systemTemplate.replace(OVERVIEW_SLOT,LocalDevTools.overview(tools.staged!=null?tools.staged:project));
      try{
-      response=client.request(profile,key,messages,systemNow,debug,null);
+      response=client.request(profile,key,messages,degradedSystem,debug,null);
       client.usageSegments.put(new JSONObject().put("usage",response.getJSONObject("usage"))
        .put("elapsedMs",System.currentTimeMillis()-began).put("status","ok"));
      }catch(Exception e2){
@@ -900,6 +1149,31 @@ final class DevAgent {
        +"。请重新输出一遍完整、合法的 JSON 参数（字符串要闭合，{ 和 [ 要配对），"
        +"不要带任何解释文字。如果是因为内容太长被截断了，"
        +"请把大文件分成几步写：先 write_files 写前半部分，再用 patch_file 追加后面的内容。");
+     }else if(!canExecute(name,call)){
+      /*
+       * 参数被截断后补全过 —— 但<b>不能就这么执行</b>。
+       *
+       * <p><b>为什么：</b>补全只是把括号和引号闭上，
+       * 断掉的<b>内容本身没有回来</b>。
+       * 模型写一个大文件时输出到一半被 max_tokens 砍掉，
+       * 补全后 content 就是前半截 —— 直接执行的话，
+       * 文件里只有一半代码，工具还报「写入成功」。
+       *
+       * <p>模型自己也会被这个假成功骗过去：它以为文件写好了，
+       * 下一轮去编译，编译过了（前半截也能编译），
+       * 用户拿到的却是一个缺了一半的文件。
+       *
+       * <p>所以写文件类的工具，补全后必须拒绝执行，
+       * 让模型重新发一遍 —— 并且明确告诉它「内容不完整，重发」。
+       */
+      result.put("error","你这次的参数被截断了，系统只补上了收尾的括号，"
+       +"但正文内容没有补回来（你发出的原文在："
+       +call.optString("argsError","")
+       +"）。"
+       +"如果这是写文件类工具（write_files / patch_file / multi_patch），"
+       +"继续执行会把只有一半的文件写进项目 —— 所以这次没有执行。"
+       +"请重新完整输出这一次的内容：控制单次输出长度，"
+       +"大文件分几次写（先 write_files 写前半部分，再用 patch_file 追加后面的部分）。");
      }else{
       try{
        result.put("result",tools.callOnce(name,args));
@@ -909,8 +1183,8 @@ final class DevAgent {
       }
       /* 补全过的参数要告诉模型一声，它才知道自己上次写坏了。 */
       if(call.optBoolean("argsRepaired",false))
-       result.put("note","你上一次的参数被截断了，系统自动补全括号后执行成功。"
-        +"下次请控制单次输出长度，大文件分几次写。");
+       result.put("note","你上次的参数被截断了，系统自动补全括号后执行成功。"
+        +"不过内容可能仍然不完整，请检查结果对不对；下次控制单次输出长度，大文件分几次写。");
      }
      results.put(result);
      trail.put(result);
@@ -941,13 +1215,23 @@ final class DevAgent {
       JSONObject check=LocalCompiler.check(a,tools.staged);
       JSONObject res=new JSONObject().put("name","auto_check_project").put("result",check);
       results.put(res);trail.put(res);
-      JSONArray checkMessages=toolResultMessages(new JSONArray().put(res),protocol);
-      for(int i=0;i<checkMessages.length();i++)messages.put(checkMessages.getJSONObject(i));
+      /*
+       * 编译结果<b>不能</b>当成工具结果发回去。
+       *
+       * <p><b>为什么：</b>原生协议里，每个 tool 消息必须配对一个 tool_call_id。
+       * 自动编译是我们自己跑的，不是模型调的，所以它没有 id。
+       * 硬塞一条 id 为空的 tool 消息，服务端会直接拒掉整个请求（400）——
+       * 表现是「模型改完文件，下一轮就崩」，报错还完全不指向真正原因。
+       *
+       * <p>所以走普通用户消息：OpenAI 追加一条 role:"user"；
+       * Anthropic 则把内容追加到已有的 user 消息里
+       * （连续的 user 消息在 Anthropic 那边会被合并，另起一条更稳）。
+       */
+      appendAutoCheck(messages,check.toString(),protocol);
      }catch(Exception e){
       JSONObject res=new JSONObject().put("name","auto_check_project").put("error",safeParseError(e));
       results.put(res);trail.put(res);
-      JSONArray errMessages=toolResultMessages(new JSONArray().put(res),protocol);
-      for(int i=0;i<errMessages.length();i++)messages.put(errMessages.getJSONObject(i));
+      appendAutoCheck(messages,"自动验证编译失败："+safeParseError(e),protocol);
      }
     }
     /* 整轮全败才计数；有一成成功就清零。 */
