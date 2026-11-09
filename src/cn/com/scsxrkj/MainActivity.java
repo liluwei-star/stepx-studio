@@ -3251,13 +3251,35 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
    }
    File[] fa=dir.listFiles();
    if(fa==null)return;
-   int n=0;
+   int n=0,stale=0;
+   long now=System.currentTimeMillis();
    for(File f:fa){
-    if(f.isFile()&&f.getName().endsWith(".bin")&&!live.contains(f.getName())){
+    if(!f.isFile())continue;
+    String nm=f.getName();
+    /*
+     * 导入大文件时先写 tmp-xxx.part，读完拿到内容哈希才改成正式的 .bin。
+     * 正常路径上这个临时文件一定会被删（importEntry 的 finally 兜底），
+     * 但有两种情况会漏：
+     *
+     *   1. 用户正在导入时点「强制停止」，或者系统内存紧张把进程回收；
+     *   2. 更早的版本没有 finally 兜底，异常分支直接就把半成品留在盘上。
+     *
+     * 这些文件不带 .bin 后缀，走不到下面的回收分支，等于永久垃圾。
+     * 一个 80 MB 的模型读一半被掐就是 40 MB，用户完全看不到它在哪。
+     *
+     * 留一小时的时间窗：正在导入的那个 tmp 肯定没这么久，
+     * 而真正变成垃圾的都是几分钟后再也不会被认领的。
+     */
+    if(nm.startsWith("tmp-")&&nm.endsWith(".part")){
+     if(now-f.lastModified()>3600000L&&f.delete())stale++;
+     continue;
+    }
+    if(nm.endsWith(".bin")&&!live.contains(nm)){
      if(f.delete())n++;
     }
    }
    if(n>0)android.util.Log.i("NeoCloudFiles","清理无人引用的大文件 "+n+" 个");
+   if(stale>0)android.util.Log.i("NeoCloudFiles","清理中断导入的临时文件 "+stale+" 个");
   }catch(Exception ignored){}
  }
 
@@ -3582,8 +3604,25 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
       if(CloudFiles.isRef(e)){
        String ref=e.getString(CloudFiles.REF_MARK);
        bins.put(name,ref);
-       File big=new File(CloudFiles.bigDir(getFilesDir()),ref);
-       if(big.isFile())hashes.put(name,CloudFiles.hashFile(big));
+       /*
+        * 哈希直接用导入时算好的那份 sha256。
+        *
+        * <p>importEntry 为了按内容定名，本来就已经把整个文件流过一遍 MD5/SHA 了，
+        * 结果就写在 entry 的 sha256 字段里。原来这里又 new 一个 File 交给 hashFile，
+        * 把刚写下去的整个文件<b>从头再读一遍</b>。
+        *
+        * <p>补全一个带模型权重的项目，二三十个大文件、每个几十兆，
+        * 就是白读一两 GB。手机存储读速几十 MB/s，等于凭空多等一分钟以上，
+        * 用户看到的是进度条不动，很容易以为卡死然后强退 —— 那样才会真的留下半截项目。
+        *
+        * <p>只有老存档或手工塞进来的条目没有 sha256 字段，那时才退回读盘。
+        */
+       String sha=e.optString("sha256","");
+       if(sha.isEmpty()){
+        File big=new File(CloudFiles.bigDir(getFilesDir()),ref);
+        if(big.isFile())sha=CloudFiles.hashFile(big);
+       }
+       if(!sha.isEmpty())hashes.put(name,sha);
       }else if("utf8".equals(e.optString("encoding"))){
        files.put(name,e.getString("content"));
       }else{
@@ -3790,38 +3829,69 @@ File exportFile;int importKind,handoffAttempts=0;long requestSerial=0;
     */
    File tmp=new File(CloudFiles.bigDir(getFilesDir()),"tmp-"+UUID.randomUUID().toString()+".part");
    java.security.MessageDigest md=java.security.MessageDigest.getInstance("SHA-256");
-   try(java.io.FileOutputStream out=new java.io.FileOutputStream(tmp)){
-    byte[] done=head.toByteArray();
-    out.write(done);
-    md.update(done);
-    int n;
-    while((n=z.read(buf))!=-1){
-     total+=n;
-     if(total>MAX_IMPORT_FILE){
-      out.close();
-      tmp.delete();   // 半成品留着没用，删掉
-      throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
+   /*
+    * 临时文件必须保证被清理 —— 无论成功还是失败。
+    *
+    * <p>原来只在「超过单文件上限」那一个分支里 tmp.delete()。
+    * 但这条流出问题的方式远不止那一种：包损坏导致 z.read 抛 IOException、
+    * 写到一半磁盘满导致 out.write 抛 IOException、读的过程中用户切走应用被系统掐掉。
+    * 这些情况都会让 try-with-resources 关掉输出流，然后<b>把已经写下去的那几十兆
+    * 留在 project-files 里没人管</b> —— 文件名是 tmp-xxx.part，而 gcBigFiles 只认 .bin。
+    *
+    * <p>后果是隐形的：用户导入一个 80 MB 的模型、中途空间不够，发现「补全失败」，
+    * 腾出空间再试一次又失败 —— 磁盘上已经堆了两三个 80 MB 的 .part，
+    * 越腾越少，界面上又没有任何地方告诉他这些垃圾在哪。
+    *
+    * <p>所以改成 finally 兜底：只要没成功改名成正式文件，就把 tmp 删掉。
+    */
+   boolean moved=false;
+   try{
+    try(java.io.FileOutputStream out=new java.io.FileOutputStream(tmp)){
+     byte[] done=head.toByteArray();
+     out.write(done);
+     md.update(done);
+     int n;
+     while((n=z.read(buf))!=-1){
+      total+=n;
+      if(total>MAX_IMPORT_FILE)throw new Exception("包内单个文件超过 "+MAX_IMPORT_FILE/1048576+" MB："+name);
+      md.update(buf,0,n);
+      out.write(buf,0,n);
      }
-     md.update(buf,0,n);
-     out.write(buf,0,n);
     }
+    StringBuilder s=new StringBuilder();
+    for(byte v:md.digest())s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));
+    String sha=s.toString();
+    String ref=sha.substring(0,32)+".bin";
+    File target=new File(CloudFiles.bigDir(getFilesDir()),ref);
+    /*
+     * 内容相同就已经有一份了 —— 名字是内容哈希，同名即同内容，不必再存一遍。
+     *
+     * <p><b>改名失败不能当成功。</b>原来写的是
+     * {@code if(!tmp.renameTo(target))tmp.delete();} —— 改名失败就把读好的文件删掉，
+     * 然后照样往 binaryFiles 里写一个指向 ref 的引用，照样 added++、照样算进「补了 X MB」。
+     * 备份恢复最常见的中断方式就是空间满或外置存储被拔，
+     * 那时候 renameTo 会返回 false，于是用户看到「补了 12 个文件」，
+     * 其中若干个大文件点开是「内容缺失」，而磁盘上既没有内容也没有半成品。
+     *
+     * <p>改名失败只有一种正确处理：明确报错。宁可整次补全失败让用户重来，
+     * 也不能交付一个「清单里有、内容没有」的项目。
+     */
+    if(!target.isFile()){
+     if(!tmp.renameTo(target))throw new Exception("写入大文件失败（可能空间不足）："+name);
+     moved=true;
+    }
+    /*
+     * 上面 if 外面不要把 moved 设成 true。内容重复时根本不会走 renameTo，
+     * tmp 还在盘上，得靠 finally 删掉 —— 若在这里无条件置 true，那个分支就漏了。
+     */
+    entries.put(name,new JSONObject()
+      .put(CloudFiles.REF_MARK,ref)
+      .put("sha256",sha)
+      .put("size",total));
+    return total;
+   }finally{
+    if(!moved&&tmp.isFile())tmp.delete();
    }
-   StringBuilder s=new StringBuilder();
-   for(byte v:md.digest())s.append(String.format(java.util.Locale.ROOT,"%02x",v&255));
-   String sha=s.toString();
-   String ref=sha.substring(0,32)+".bin";
-   File target=new File(CloudFiles.bigDir(getFilesDir()),ref);
-   // 内容相同就已经有一份了 —— 名字是内容哈希，同名即同内容，不必再存一遍
-   if(!target.isFile()){
-    if(!tmp.renameTo(target))tmp.delete();
-   }else{
-    tmp.delete();
-   }
-   entries.put(name,new JSONObject()
-     .put(CloudFiles.REF_MARK,ref)
-     .put("sha256",sha)
-     .put("size",total));
-   return total;
   }
 
   // 小文件：判断文本还是二进制
